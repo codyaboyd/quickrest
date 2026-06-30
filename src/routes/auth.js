@@ -4,7 +4,8 @@ import { getCookie } from 'hono/cookie';
 import { query } from '../db/postgres.js';
 import { CSRF_COOKIE, createSession, destroySession, hashSecret, verifySecret } from '../services/authService.js';
 import { ensureUserApiKey } from '../services/apiKeyService.js';
-import { ensureCreditBalance } from '../services/creditService.js';
+import { ensureCreditBalance, adjustCredits } from '../services/creditService.js';
+import { getSetting } from '../services/adminSettingsService.js';
 
 export const auth = new Hono();
 
@@ -49,6 +50,7 @@ auth.get('/check-email', async (c) => {
 
 auth.post('/signup', async (c) => {
   const form = await body(c);
+  if (!(await getSetting('auth.signup_enabled', true))) return c.json({ error: 'Signup is currently disabled' }, 403);
   if (!csrfOk(c, form)) return c.json({ error: 'Invalid CSRF token' }, 403);
   const parsed = z.object({ username: usernameSchema, email: emailSchema, password: passwordSchema, recoveryPin: pinSchema }).safeParse(form);
   if (!parsed.success) return c.json({ error: 'Invalid sign up details', details: parsed.error.flatten().fieldErrors }, 400);
@@ -61,6 +63,8 @@ auth.post('/signup', async (c) => {
     );
     await query('insert into recovery_pins (user_id, pin_hash) values ($1, $2)', [result.rows[0].id, pinHash]);
     await ensureCreditBalance(result.rows[0].id);
+    const startingCredits = Number(await getSetting('credits.default_starting_credits', 0));
+    if (startingCredits > 0) await adjustCredits({ userId: result.rows[0].id, amount: startingCredits, description: 'Starting credits', createdBy: result.rows[0].id });
     const key = await ensureUserApiKey(result.rows[0].id);
     await createSession(c, result.rows[0]);
     if (wantsHtml(c)) return c.html(`<div class="container py-5"><div class="alert alert-warning"><h1 class="h4">Your API key</h1><p>Store this API key now. It will only be shown once.</p><code>${key.rawKey}</code></div><a href="/dashboard">Continue to dashboard</a></div>`, 201);

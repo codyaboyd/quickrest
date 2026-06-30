@@ -7,6 +7,8 @@ import { requireAdmin } from '../middleware/auth.js';
 import { CSRF_COOKIE } from '../services/authService.js';
 import { layout } from '../templates/layout.js';
 import { adjustCredits, usageSummary } from '../services/creditService.js';
+import { definitionMap, getAdminSettings, updateSetting } from '../services/adminSettingsService.js';
+import { env } from '../config/env.js';
 
 export const admin = new Hono();
 admin.use('*', requireAdmin);
@@ -51,7 +53,10 @@ function parseCustomHeaders(raw) {
 function parseRequestHeaders(raw) { return parseCustomHeaders(raw); }
 function headersConfig(data) { return { forwardHeaders: parseHeaderNames(data.forwardHeaders), customHeaders: parseCustomHeaders(data.customHeaders) }; }
 function csrf(c) { return getCookie(c, CSRF_COOKIE) || ''; }
-function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/billing">Billing packages & revenue</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
+async function auditAdminChange(c, action, entityType, entityId = null, metadata = {}) {
+  await query(`insert into audit_logs (actor_user_id, action, entity_type, entity_id, ip_address, user_agent, metadata) values ($1,$2,$3,$4,nullif($5, '')::inet,$6,$7::jsonb)`, [c.get('user')?.id || null, action, entityType, entityId, c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '', c.req.header('user-agent') || '', JSON.stringify(metadata)]);
+}
+function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/settings">Platform settings</a><a class="list-group-item" href="/admin/audit">Audit log</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/billing">Billing packages & revenue</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
 function errorBlock(errors) { return errors?.length ? `<div class="alert alert-danger"><strong>Fix these issues:</strong><ul class="mb-0">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>` : ''; }
 function endpointForm(c, action, endpoint = {}, errors = []) {
   const config = endpoint.headers_config || {};
@@ -68,6 +73,49 @@ admin.get('/', async (c) => {
   const usage = await query(`select coalesce(sum(credits_charged),0)::int credits, count(*)::int calls from api_usage_logs where endpoint_id is not null`);
   const s = stats.rows[0], u = usage.rows[0];
   return render(c, 'Admin dashboard', `<div class="container py-5"><h1 class="fw-bold mb-4">Admin dashboard</h1>${adminNav()}<div class="row g-4"><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Endpoints</span><h2>${s.total}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Enabled</span><h2>${s.enabled}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Proxy calls</span><h2>${u.calls}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credits used</span><h2>${u.credits}</h2></div></div></div></div></div>`);
+});
+
+
+function parseSettingValue(definition, raw) {
+  if (definition.type === 'boolean') return raw === 'on' || raw === 'true' || raw === true;
+  if (definition.type === 'number') return z.coerce.number().int().min(0).max(100000000).parse(raw);
+  if (definition.type === 'url') return z.string().trim().url().max(2048).parse(raw);
+  if (definition.type === 'select') return z.enum(definition.options).parse(raw);
+  if (definition.type === 'json') {
+    const parsed = JSON.parse(raw || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('JSON settings must be objects.');
+    return parsed;
+  }
+  return z.string().trim().max(4000).parse(raw || '');
+}
+function settingInput(setting) {
+  const value = setting.type === 'json' ? JSON.stringify(setting.value, null, 2) : String(setting.value ?? '');
+  if (setting.type === 'boolean') return `<div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="value" ${setting.value ? 'checked' : ''}><label class="form-check-label">Enabled</label></div>`;
+  if (setting.type === 'textarea' || setting.type === 'json') return `<textarea class="form-control ${setting.type === 'json' ? 'font-monospace' : ''}" name="value" rows="${setting.type === 'json' ? 6 : 3}">${escapeHtml(value)}</textarea>`;
+  if (setting.type === 'select') return `<select class="form-select" name="value">${setting.options.map((option) => `<option value="${option}" ${option === setting.value ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select>`;
+  return `<input class="form-control" name="value" type="${setting.type === 'number' ? 'number' : 'text'}" value="${escapeHtml(value)}">`;
+}
+
+admin.get('/settings', async (c) => {
+  const settings = await getAdminSettings();
+  const rows = settings.map((setting) => `<div class="card mb-3"><div class="card-body"><form method="post" action="/admin/settings/${encodeURIComponent(setting.key)}"><input type="hidden" name="csrfToken" value="${csrf(c)}"><div class="row g-3 align-items-start"><div class="col-lg-4"><h2 class="h6 mb-1">${escapeHtml(setting.label)}</h2><code>${escapeHtml(setting.key)}</code><p class="text-muted small mb-0">${escapeHtml(setting.description || '')}</p></div><div class="col-lg-6">${settingInput(setting)}</div><div class="col-lg-2"><button class="btn btn-primary w-100">Save</button></div></div></form></div></div>`).join('');
+  return render(c, 'Platform settings', `<div class="container py-5"><h1 class="fw-bold">Platform settings</h1>${adminNav()}<div class="alert alert-info">Stripe secret status is derived from environment config: <strong>${env.STRIPE_SECRET_KEY ? 'configured' : 'missing'}</strong>. Secret values are not displayed.</div>${rows}</div>`);
+});
+
+admin.post('/settings/:key', async (c) => {
+  const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  const key = decodeURIComponent(c.req.param('key'));
+  const definition = definitionMap().get(key);
+  if (!definition) return c.json({ error: 'Unknown setting' }, 404);
+  try { await updateSetting({ key, value: parseSettingValue(definition, data.value), updatedBy: c.get('user').id, c }); }
+  catch (error) { return c.json({ errors: [error.message] }, 400); }
+  return c.redirect('/admin/settings', 303);
+});
+
+admin.get('/audit', async (c) => {
+  const logs = (await query(`select a.created_at, u.email, a.action, a.entity_type, a.metadata from audit_logs a left join users u on u.id = a.actor_user_id order by a.created_at desc limit 200`)).rows;
+  const rows = logs.map((log) => `<tr><td>${log.created_at}</td><td>${escapeHtml(log.email || 'system')}</td><td>${escapeHtml(log.action)}</td><td>${escapeHtml(log.entity_type)}</td><td><pre class="mb-0 small">${escapeHtml(JSON.stringify(log.metadata, null, 2))}</pre></td></tr>`).join('');
+  return render(c, 'Audit log', `<div class="container py-5"><h1 class="fw-bold">Audit log</h1>${adminNav()}<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Date</th><th>Actor</th><th>Action</th><th>Entity</th><th>Metadata</th></tr></thead><tbody>${rows}</tbody></table></div></div>`);
 });
 
 admin.get('/endpoints', async (c) => {
@@ -95,13 +143,13 @@ async function saveEndpoint(c, id) {
   let config; try { config = headersConfig(parsed.data); } catch (error) { return c.json({ errors: [error.message] }, 400); }
   const values = [parsed.data.publicPath, parsed.data.targetUrl, parsed.data.httpMethod, parsed.data.isEnabled, config, parsed.data.timeoutMs, parsed.data.creditCost, parsed.data.description, parsed.data.adminNotes, parsed.data.deductCreditsOnFailure, c.get('user').id];
   const sql = id ? `update proxy_endpoints set public_path=$1,target_url=$2,http_method=$3,is_enabled=$4,headers_config=$5,timeout_ms=$6,credit_cost=$7,description=$8,admin_notes=$9,deduct_credits_on_failure=$10,updated_by=$11 where id=$12 returning *` : `insert into proxy_endpoints (public_path,target_url,http_method,is_enabled,headers_config,timeout_ms,credit_cost,description,admin_notes,deduct_credits_on_failure,created_by,updated_by) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) returning *`;
-  try { const saved = await query(sql, id ? [...values, id] : values); return wantsJson(c) ? c.json({ endpoint: saved.rows[0] }, id ? 200 : 201) : c.redirect(`/admin/endpoints/${saved.rows[0].id}`, 303); }
+  try { const saved = await query(sql, id ? [...values, id] : values); await auditAdminChange(c, id ? 'admin_endpoint_updated' : 'admin_endpoint_created', 'proxy_endpoint', saved.rows[0].id, { publicPath: saved.rows[0].public_path, method: saved.rows[0].http_method }); return wantsJson(c) ? c.json({ endpoint: saved.rows[0] }, id ? 200 : 201) : c.redirect(`/admin/endpoints/${saved.rows[0].id}`, 303); }
   catch (error) { return c.json({ errors: [error.code === '23505' ? 'An endpoint with this path and method already exists.' : error.message] }, 400); }
 }
 admin.post('/endpoints', (c) => saveEndpoint(c));
 admin.post('/endpoints/:id', (c) => saveEndpoint(c, c.req.param('id')));
-admin.post('/endpoints/:id/toggle', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('update proxy_endpoints set is_enabled = not is_enabled, updated_by = $2 where id = $1', [c.req.param('id'), c.get('user').id]); return c.redirect(`/admin/endpoints/${c.req.param('id')}`, 303); });
-admin.post('/endpoints/:id/delete', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('delete from proxy_endpoints where id = $1', [c.req.param('id')]); return c.redirect('/admin/endpoints', 303); });
+admin.post('/endpoints/:id/toggle', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('update proxy_endpoints set is_enabled = not is_enabled, updated_by = $2 where id = $1', [c.req.param('id'), c.get('user').id]); await auditAdminChange(c, 'admin_endpoint_toggled', 'proxy_endpoint', c.req.param('id')); return c.redirect(`/admin/endpoints/${c.req.param('id')}`, 303); });
+admin.post('/endpoints/:id/delete', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('delete from proxy_endpoints where id = $1', [c.req.param('id')]); await auditAdminChange(c, 'admin_endpoint_deleted', 'proxy_endpoint', c.req.param('id')); return c.redirect('/admin/endpoints', 303); });
 
 
 const packageSchema = z.object({
@@ -133,8 +181,10 @@ async function savePackage(c, id) {
   const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
   const parsed = packageSchema.safeParse(data); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
   const v = parsed.data;
+  let packageId = id;
   if (id) await query(`update credit_packages set name=$1, credits=$2, amount_cents=$3, currency=$4, sort_order=$5, is_active=$6, updated_by=$7 where id=$8`, [v.name, v.credits, v.amountCents, v.currency, v.sortOrder, v.isActive, c.get('user').id, id]);
-  else await query(`insert into credit_packages (name, credits, amount_cents, currency, sort_order, is_active, created_by, updated_by) values ($1,$2,$3,$4,$5,$6,$7,$7)`, [v.name, v.credits, v.amountCents, v.currency, v.sortOrder, v.isActive, c.get('user').id]);
+  else packageId = (await query(`insert into credit_packages (name, credits, amount_cents, currency, sort_order, is_active, created_by, updated_by) values ($1,$2,$3,$4,$5,$6,$7,$7) returning id`, [v.name, v.credits, v.amountCents, v.currency, v.sortOrder, v.isActive, c.get('user').id])).rows[0].id;
+  await auditAdminChange(c, id ? 'admin_credit_package_updated' : 'admin_credit_package_created', 'credit_package', packageId, v);
   return c.redirect('/admin/billing', 303);
 }
 admin.post('/billing/packages', (c) => savePackage(c));
@@ -158,7 +208,7 @@ admin.get('/credits', async (c) => {
 admin.post('/credits/adjust', async (c) => {
   const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
   const parsed = creditAdjustSchema.safeParse(data); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
-  try { await adjustCredits({ userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description, createdBy: c.get('user').id }); }
+  try { await adjustCredits({ userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description, createdBy: c.get('user').id }); await auditAdminChange(c, 'admin_credits_adjusted', 'user', null, { userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description }); }
   catch (error) { return c.json({ error: error.message }, 400); }
   return c.redirect('/admin/credits', 303);
 });
@@ -166,7 +216,7 @@ admin.post('/credits/adjust', async (c) => {
 admin.get('/api/credits/transactions', async (c) => c.json({ transactions: (await query(`select * from credit_transactions order by created_at desc limit 500`)).rows }));
 admin.post('/api/credits/adjust', async (c) => {
   const parsed = creditAdjustSchema.safeParse(await body(c)); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
-  try { return c.json(await adjustCredits({ userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description, createdBy: c.get('user').id })); }
+  try { const adjusted = await adjustCredits({ userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description, createdBy: c.get('user').id }); await auditAdminChange(c, 'admin_credits_adjusted', 'user', null, { userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description }); return c.json(adjusted); }
   catch (error) { return c.json({ error: error.message }, 400); }
 });
 
@@ -183,8 +233,8 @@ admin.post('/test', async (c) => {
 admin.get('/api/endpoints', async (c) => c.json({ endpoints: (await query('select * from proxy_endpoints order by created_at desc')).rows }));
 admin.post('/api/endpoints', (c) => saveEndpoint(c));
 admin.post('/api/endpoints/:id', (c) => saveEndpoint(c, c.req.param('id')));
-admin.post('/api/endpoints/:id/toggle', async (c) => { await query('update proxy_endpoints set is_enabled = not is_enabled, updated_by = $2 where id = $1 returning *', [c.req.param('id'), c.get('user').id]); return c.json({ ok: true }); });
-admin.delete('/api/endpoints/:id', async (c) => { await query('delete from proxy_endpoints where id = $1', [c.req.param('id')]); return c.json({ ok: true }); });
+admin.post('/api/endpoints/:id/toggle', async (c) => { await query('update proxy_endpoints set is_enabled = not is_enabled, updated_by = $2 where id = $1 returning *', [c.req.param('id'), c.get('user').id]); await auditAdminChange(c, 'admin_endpoint_toggled', 'proxy_endpoint', c.req.param('id')); return c.json({ ok: true }); });
+admin.delete('/api/endpoints/:id', async (c) => { await query('delete from proxy_endpoints where id = $1', [c.req.param('id')]); await auditAdminChange(c, 'admin_endpoint_deleted', 'proxy_endpoint', c.req.param('id')); return c.json({ ok: true }); });
 admin.post('/api/test', async (c) => {
   const data = await body(c);
   const parsed = testSchema.safeParse(data); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
