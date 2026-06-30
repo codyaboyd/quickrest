@@ -1,0 +1,23 @@
+{
+  "name": "quickrest",
+  "version": "0.1.0",
+  "description": "Paid API proxy platform for combining upstream APIs and selling access through credits.",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server.js",
+    "start": "bun src/server.js",
+    "check": "DATABASE_URL=postgres://quickrest:quickrest@localhost:5432/quickrest REDIS_URL=redis://localhost:6379 SESSION_SECRET=dev-check-secret-change-before-prod bun -e \"await import('./src/server.js'); const { redis } = await import('./src/lib/redis.js'); const { pool } = await import('./src/db/postgres.js'); redis.disconnect(); await pool.end();\"",
+    "db:migrate": "bun run src/db/migrate.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "latest",
+    "dotenv": "latest",
+    "hono": "latest",
+    "ioredis": "latest",
+    "pg": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  }
+}

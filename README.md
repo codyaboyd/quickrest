@@ -1,76 +1,124 @@
 # QuickRest
 
-QuickRest is an API aggregator, authentication layer, and credit management system for teams that need a single, controlled gateway to multiple upstream services.
+QuickRest is a full-stack SaaS starter for a paid API proxy platform. It combines multiple upstream APIs behind one gateway, protects access with API keys and Redis-backed controls, and lays the foundation for credit-based billing.
 
-## What QuickRest does
+## Stack
 
-QuickRest is designed to sit between client applications and third-party or internal APIs. Instead of every product integration managing provider-specific credentials, rate limits, quotas, and billing rules on its own, QuickRest centralizes those concerns behind one consistent REST interface.
+- **Runtime:** Bun
+- **HTTP framework:** Hono
+- **Database:** PostgreSQL
+- **Cache/rate limits/sessions:** Redis
+- **Frontend:** Bootstrap 5 with server-rendered templates and vanilla JavaScript
+- **Configuration:** validated environment variables with `dotenv` and `zod`
 
-Core responsibilities include:
+## Features included
 
-- **API aggregation**: route requests to multiple upstream APIs through one gateway.
-- **Authentication**: validate clients before they can access aggregated API services.
-- **Credit management**: track usage, enforce balances, and make API consumption measurable.
-- **Operational control**: provide a foundation for request auditing, provider abstraction, quota enforcement, and future billing workflows.
+- Clean Bootstrap 5 marketing page and starter dashboard
+- Central Hono app with request logging and global error handling
+- `/health` endpoint that checks PostgreSQL and Redis
+- Redis-backed API rate limiting middleware
+- Demo proxy endpoints at `/api/proxy/:service`
+- PostgreSQL connection pool and migration script for tenants, services, API keys, and usage events
+- Docker Compose for local PostgreSQL and Redis
+- Secure `.env.example` with required configuration
 
-## API aggregation
+## Project structure
 
-QuickRest helps applications consume many APIs through a shared access point. This keeps client implementations simpler and makes it easier to change, add, or remove upstream providers without forcing every consumer to update its integration logic.
+```text
+.
+├── docker-compose.yml
+├── package.json
+├── public/
+│   ├── css/app.css
+│   └── js/app.js
+└── src/
+    ├── config/env.js
+    ├── db/
+    │   ├── migrate.js
+    │   └── postgres.js
+    ├── lib/redis.js
+    ├── middleware/
+    │   ├── logger.js
+    │   └── rateLimit.js
+    ├── routes/
+    │   ├── api.js
+    │   └── pages.js
+    ├── services/proxyService.js
+    ├── templates/layout.js
+    └── server.js
+```
 
-Potential aggregation features include:
+## Getting started
 
-- Unified REST endpoints for multiple providers.
-- Provider-specific request translation.
-- Centralized response normalization.
-- Routing based on service, tenant, user, or plan.
-- Shared observability for all outbound API traffic.
+### Prerequisites
 
-## Authentication
+- Bun 1.1+
+- Docker and Docker Compose
 
-QuickRest is intended to protect API access before requests reach upstream services. A centralized authentication layer allows teams to issue, rotate, and revoke access consistently across every aggregated API.
+### 1. Install dependencies
 
-Authentication capabilities may include:
+```bash
+bun install
+```
 
-- API keys or bearer tokens for client access.
-- Tenant-aware credential validation.
-- Scoped permissions for services or endpoints.
-- Token expiration and revocation workflows.
-- Separation between client credentials and upstream provider secrets.
+### 2. Configure environment variables
 
-## Credit management
+```bash
+cp .env.example .env
+```
 
-QuickRest provides a place to manage usage-based access through credits. Credits can represent request allowances, prepaid usage, plan limits, or internal cost accounting units.
+Update `SESSION_SECRET` in `.env` to a long random value before using the app outside local development.
 
-Credit management capabilities may include:
+### 3. Start infrastructure
 
-- Per-user, per-team, or per-tenant balances.
-- Credit deduction per request, endpoint, provider, or usage unit.
-- Balance checks before proxying upstream calls.
-- Usage history for audits and billing reconciliation.
-- Configurable costs for different API services.
+```bash
+docker compose up -d
+```
 
-## Example flow
+This starts PostgreSQL on `localhost:5432` and Redis on `localhost:6379`.
 
-1. A client sends a request to QuickRest with its authentication credentials.
-2. QuickRest validates the client and checks whether it has permission to use the requested API service.
-3. QuickRest verifies that the account has enough credits for the request.
-4. QuickRest forwards the request to the selected upstream provider.
-5. QuickRest normalizes the response and returns it to the client.
-6. QuickRest records usage and deducts credits according to the configured pricing rules.
+### 4. Run migrations
 
-## Use cases
+```bash
+bun run db:migrate
+```
 
-QuickRest is useful for:
+### 5. Start the application
 
-- SaaS platforms exposing multiple AI, data, payment, messaging, or infrastructure APIs behind one gateway.
-- Internal developer platforms that need shared authentication and cost controls.
-- Marketplaces or reseller platforms that meter downstream customer API usage.
-- Products that need to hide upstream provider credentials from client applications.
+```bash
+bun run dev
+```
 
-## Project status
+Open <http://localhost:3000>.
 
-This repository currently documents the intended purpose and scope of QuickRest. Implementation details, setup instructions, and API reference material should be added as the system is built out.
+## Useful endpoints
 
-## License
+- `GET /` — marketing homepage
+- `GET /dashboard` — starter SaaS dashboard
+- `GET /health` — service health with PostgreSQL and Redis checks
+- `GET /api/services` — configured demo proxy services
+- `GET /api/proxy/httpbin?hello=quickrest` — demo upstream proxy request
+- `GET /api/proxy/weather?latitude=40.7&longitude=-74&current=temperature_2m` — demo weather proxy request
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+## Environment variables
+
+| Name | Description |
+| --- | --- |
+| `NODE_ENV` | `development`, `test`, or `production` |
+| `APP_NAME` | Display name used in server-rendered pages |
+| `APP_URL` | Public base URL used by startup logs |
+| `PORT` | HTTP port |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `SESSION_SECRET` | Long random secret for session/signing support |
+| `RATE_LIMIT_WINDOW_SECONDS` | Redis rate-limit window size |
+| `RATE_LIMIT_MAX_REQUESTS` | Max API requests per window |
+| `DEFAULT_CREDIT_COST` | Default credit cost for demo proxy services |
+
+## Next build steps
+
+1. Add authenticated tenant signup and dashboard login.
+2. Store upstream services in PostgreSQL instead of the in-memory demo registry.
+3. Hash and validate customer API keys before proxying.
+4. Deduct credits transactionally when upstream requests succeed.
+5. Add Stripe or another payment provider for paid credit purchases.
