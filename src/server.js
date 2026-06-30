@@ -5,16 +5,20 @@ import { HTTPException } from 'hono/http-exception';
 import { env, isProduction } from './config/env.js';
 import { requestLogger } from './middleware/logger.js';
 import { rateLimit } from './middleware/rateLimit.js';
+import { loadSession } from './middleware/auth.js';
 import { api, healthHandler } from './routes/api.js';
+import { auth } from './routes/auth.js';
 import { pages } from './routes/pages.js';
 
 const app = new Hono();
 
 app.use('*', requestLogger);
 app.use('/api/*', rateLimit());
+app.use('*', loadSession);
 app.use('/assets/*', serveStatic({ root: './public' }));
 
 app.get('/health', healthHandler);
+app.route('/auth', auth);
 app.route('/', pages);
 app.route('/api', api);
 

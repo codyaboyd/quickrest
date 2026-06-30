@@ -1,7 +1,10 @@
 import { env } from '../config/env.js';
 
-export function layout({ title, children }) {
+export function layout({ title, children, user }) {
   const pageTitle = title ? `${title} · ${env.APP_NAME}` : env.APP_NAME;
+  const accountLinks = user
+    ? `<li class="nav-item"><a class="nav-link" href="/account">${user.username}</a></li><li class="nav-item"><a class="nav-link" href="/logout">Logout</a></li>`
+    : `<li class="nav-item"><a class="nav-link" href="/login">Login</a></li><li class="nav-item"><a class="nav-link" href="/signup">Sign up</a></li>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -22,6 +25,7 @@ export function layout({ title, children }) {
         <ul class="navbar-nav ms-auto">
           <li class="nav-item"><a class="nav-link" href="/dashboard">Dashboard</a></li>
           <li class="nav-item"><a class="nav-link" href="/health">Health</a></li>
+          ${accountLinks}
         </ul>
       </div>
     </div>
