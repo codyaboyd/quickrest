@@ -6,6 +6,7 @@ import { CSRF_COOKIE, createSession, destroySession, hashSecret, verifySecret } 
 import { ensureUserApiKey } from '../services/apiKeyService.js';
 import { ensureCreditBalance, adjustCredits } from '../services/creditService.js';
 import { getSetting } from '../services/adminSettingsService.js';
+import { ERROR_CODES, clientIp, enforceNamedThrottle, errorPayload, logSuspiciousUsage } from '../services/apiProtectionService.js';
 
 export const auth = new Hono();
 
@@ -29,9 +30,9 @@ async function body(c) {
   return type.includes('application/json') ? await c.req.json() : await c.req.parseBody();
 }
 
-function fail(c, message, status = 400) {
+function fail(c, message, status = 400, code = 'AUTH_ERROR') {
   if (wantsHtml(c)) return c.redirect(`/login?error=${encodeURIComponent(message)}`, 303);
-  return c.json({ error: message }, status);
+  return c.json(errorPayload(code, message, c.get('requestId')), status);
 }
 
 auth.get('/check-username', async (c) => {
@@ -49,6 +50,8 @@ auth.get('/check-email', async (c) => {
 });
 
 auth.post('/signup', async (c) => {
+  const signupThrottled = await enforceNamedThrottle(c, 'signup_attempts', clientIp(c), { windowSeconds: 3600, max: 5 }, ERROR_CODES.SIGNUP_THROTTLED);
+  if (signupThrottled) return signupThrottled;
   const form = await body(c);
   if (!(await getSetting('auth.signup_enabled', true))) return c.json({ error: 'Signup is currently disabled' }, 403);
   if (!csrfOk(c, form)) return c.json({ error: 'Invalid CSRF token' }, 403);
@@ -77,12 +80,18 @@ auth.post('/signup', async (c) => {
 
 auth.post('/login', async (c) => {
   const form = await body(c);
+  const identity = `${clientIp(c)}:${String(form?.email || 'unknown').toLowerCase()}`;
+  const loginThrottled = await enforceNamedThrottle(c, 'login_attempts', identity, { windowSeconds: 300, max: 10 }, ERROR_CODES.LOGIN_THROTTLED);
+  if (loginThrottled) return loginThrottled;
   if (!csrfOk(c, form)) return fail(c, 'Invalid CSRF token', 403);
   const parsed = z.object({ email: emailSchema, password: passwordSchema }).safeParse(form);
   if (!parsed.success) return fail(c, 'Invalid email or password', 400);
   const result = await query('select id, username, email, password_hash, role, status, created_at from users where email = $1', [parsed.data.email]);
   const user = result.rows[0];
-  if (!user || !(await verifySecret(user.password_hash, parsed.data.password))) return fail(c, 'Invalid email or password', 401);
+  if (!user || !(await verifySecret(user.password_hash, parsed.data.password))) {
+    await logSuspiciousUsage({ c, userId: user?.id || null, reason: 'login_failed', severity: 'medium', metadata: { email: parsed.data.email } });
+    return fail(c, 'Invalid email or password', 401, 'INVALID_CREDENTIALS');
+  }
   if (user.status === 'suspended') return fail(c, 'Account suspended', 403);
   await ensureCreditBalance(user.id);
   await ensureUserApiKey(user.id);
