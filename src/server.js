@@ -10,6 +10,7 @@ import { api, healthHandler } from './routes/api.js';
 import { auth } from './routes/auth.js';
 import { pages } from './routes/pages.js';
 import { customer } from './routes/customer.js';
+import { admin } from './routes/admin.js';
 import { handleDynamicProxy } from './services/proxyEngine.js';
 
 const app = new Hono();
@@ -23,6 +24,7 @@ app.get('/health', healthHandler);
 app.route('/auth', auth);
 app.route('/', pages);
 app.route('/customer', customer);
+app.route('/admin', admin);
 app.route('/api', api);
 
 app.all('*', async (c, next) => {
