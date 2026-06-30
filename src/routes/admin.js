@@ -57,7 +57,7 @@ function csrf(c) { return getCookie(c, CSRF_COOKIE) || ''; }
 async function auditAdminChange(c, action, entityType, entityId = null, metadata = {}) {
   await query(`insert into audit_logs (actor_user_id, action, entity_type, entity_id, ip_address, user_agent, metadata) values ($1,$2,$3,$4,nullif($5, '')::inet,$6,$7::jsonb)`, [c.get('user')?.id || null, action, entityType, entityId, c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '', c.req.header('user-agent') || '', JSON.stringify(metadata)]);
 }
-function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/users">User management</a><a class="list-group-item" href="/admin/settings">Platform settings</a><a class="list-group-item" href="/admin/audit">Audit log</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/billing">Billing packages & revenue</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
+function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/users">User management</a><a class="list-group-item" href="/admin/settings">Platform settings</a><a class="list-group-item" href="/admin/audit">Audit log</a><a class="list-group-item" href="/admin/security">API protection</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/billing">Billing packages & revenue</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
 function errorBlock(errors) { return errors?.length ? `<div class="alert alert-danger"><strong>Fix these issues:</strong><ul class="mb-0">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>` : ''; }
 function endpointForm(c, action, endpoint = {}, errors = []) {
   const config = endpoint.headers_config || {};
@@ -111,6 +111,34 @@ admin.post('/settings/:key', async (c) => {
   try { await updateSetting({ key, value: parseSettingValue(definition, data.value), updatedBy: c.get('user').id, c }); }
   catch (error) { return c.json({ errors: [error.message] }, 400); }
   return c.redirect('/admin/settings', 303);
+});
+
+
+admin.get('/security', async (c) => {
+  const [suspicious, rules] = await Promise.all([
+    query(`select s.created_at, u.email, s.ip_address, s.request_path, s.reason, s.severity, s.metadata from suspicious_usage_logs s left join users u on u.id = s.user_id order by s.created_at desc limit 100`),
+    query(`select * from api_ip_access_rules order by created_at desc`)
+  ]);
+  const suspiciousRows = suspicious.rows.map((r) => `<tr><td>${r.created_at}</td><td>${escapeHtml(r.email || '')}</td><td>${escapeHtml(r.ip_address || '')}</td><td>${escapeHtml(r.request_path)}</td><td><code>${escapeHtml(r.reason)}</code></td><td>${escapeHtml(r.severity)}</td><td><pre class="mb-0 small">${escapeHtml(JSON.stringify(r.metadata, null, 2))}</pre></td></tr>`).join('');
+  const ruleRows = rules.rows.map((r) => `<tr><td>${escapeHtml(r.list_type)}</td><td><code>${escapeHtml(r.ip_address || r.cidr || '')}</code></td><td>${r.is_enabled ? 'Enabled' : 'Disabled'}</td><td>${escapeHtml(r.reason || '')}</td><td><form method="post" action="/admin/security/ip-rules/${r.id}/delete"><input type="hidden" name="csrfToken" value="${csrf(c)}"><button class="btn btn-sm btn-outline-danger">Delete</button></form></td></tr>`).join('');
+  return render(c, 'API protection', `<div class="container py-5"><h1 class="fw-bold">API protection</h1>${adminNav()}<div class="alert alert-info">Configure limits in <a href="/admin/settings">Platform settings</a>: global, per-user, per-endpoint, failed auth, login, and signup throttles.</div><div class="card mb-4"><div class="card-body"><h2 class="h5">IP allowlist/blocklist</h2><form class="row g-2" method="post" action="/admin/security/ip-rules"><input type="hidden" name="csrfToken" value="${csrf(c)}"><div class="col-md-2"><select class="form-select" name="listType"><option value="block">Block</option><option value="allow">Allow</option></select></div><div class="col-md-3"><input class="form-control" name="address" placeholder="IP or CIDR"></div><div class="col-md-5"><input class="form-control" name="reason" placeholder="Reason"></div><div class="col-md-2"><button class="btn btn-primary w-100">Add rule</button></div></form><table class="table table-sm mt-3"><thead><tr><th>Type</th><th>Address</th><th>Status</th><th>Reason</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table></div></div><h2 class="h5">Suspicious usage</h2><div class="table-responsive"><table class="table table-sm"><thead><tr><th>Date</th><th>User</th><th>IP</th><th>Path</th><th>Reason</th><th>Severity</th><th>Metadata</th></tr></thead><tbody>${suspiciousRows}</tbody></table></div></div>`);
+});
+
+admin.post('/security/ip-rules', async (c) => {
+  const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  const parsed = z.object({ listType: z.enum(['allow', 'block']), address: z.string().trim().min(1).max(64), reason: z.string().trim().max(500).optional().default('') }).safeParse(data);
+  if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
+  const isCidr = parsed.data.address.includes('/');
+  await query(`insert into api_ip_access_rules (list_type, ip_address, cidr, reason, created_by) values ($1, ${isCidr ? 'null' : '$2::inet'}, ${isCidr ? '$2::cidr' : 'null'}, $3, $4)`, [parsed.data.listType, parsed.data.address, parsed.data.reason, c.get('user').id]);
+  await auditAdminChange(c, 'admin_ip_access_rule_created', 'api_ip_access_rule', null, parsed.data);
+  return c.redirect('/admin/security', 303);
+});
+
+admin.post('/security/ip-rules/:id/delete', async (c) => {
+  const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  await query('delete from api_ip_access_rules where id = $1', [c.req.param('id')]);
+  await auditAdminChange(c, 'admin_ip_access_rule_deleted', 'api_ip_access_rule', c.req.param('id'));
+  return c.redirect('/admin/security', 303);
 });
 
 admin.get('/audit', async (c) => {

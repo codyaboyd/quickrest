@@ -4,6 +4,7 @@ import { query } from '../db/postgres.js';
 import { getSetting } from './adminSettingsService.js';
 import { deductEndpointCredits, ensureCreditBalance } from './creditService.js';
 import { hashApiKey, domainMatches, logAuthAttempt } from './apiKeyService.js';
+import { ERROR_CODES, enforceIpAccess, enforceProxyRateLimits, errorPayload, logSuspiciousUsage, clientIp, consumeRateLimit } from './apiProtectionService.js';
 
 const SUPPORTED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const HOP_BY_HOP_HEADERS = new Set([
@@ -23,15 +24,29 @@ export async function handleDynamicProxy(c) {
   const endpoint = await findEndpoint(sourceUrl.pathname, method);
   if (!endpoint) return null;
 
+  const ipAccess = await enforceIpAccess(c);
+  if (!ipAccess.ok) {
+    const auth = { ok: false, user: {}, apiKey: {} };
+    await logSuspiciousUsage({ c, endpointId: endpoint.id, reason: ipAccess.code, severity: 'high' });
+    await logProxyRequest({ endpoint, auth, c, sourceUrl, status: ipAccess.status, failureReason: ipAccess.error, startedAt, creditsCharged: 0 });
+    return c.json(errorPayload(ipAccess.code, ipAccess.error, requestId), ipAccess.status);
+  }
+
   const auth = await validateProxyAccess(c.req.raw, endpoint, c);
   if (!auth.ok) {
     await logProxyRequest({ endpoint, auth, c, sourceUrl, status: auth.status, failureReason: auth.error, startedAt, creditsCharged: 0 });
-    return c.json({ error: auth.error, requestId }, auth.status);
+    return c.json(errorPayload(auth.code, auth.error, requestId, auth.resetSeconds ? { resetSeconds: auth.resetSeconds } : {}), auth.status);
+  }
+
+  const rate = await enforceProxyRateLimits(c, { userId: auth.user.id, endpointId: endpoint.id });
+  if (!rate.ok) {
+    await logProxyRequest({ endpoint, auth, c, sourceUrl, status: rate.status, failureReason: rate.error, startedAt, creditsCharged: 0 });
+    return c.json(errorPayload(rate.code, rate.error, requestId, { resetSeconds: rate.resetSeconds }), rate.status);
   }
 
   if (!endpoint.is_enabled) {
     await logProxyRequest({ endpoint, auth, c, sourceUrl, status: 404, failureReason: 'Endpoint disabled', startedAt, creditsCharged: 0 });
-    return c.json({ error: 'Endpoint not found', requestId }, 404);
+    return c.json(errorPayload('ENDPOINT_DISABLED', 'Endpoint not found', requestId), 404);
   }
 
   const creditCost = await resolveCreditCost(endpoint);
@@ -39,7 +54,7 @@ export async function handleDynamicProxy(c) {
   if (balance < creditCost) {
     await logProxyRequest({ endpoint, auth, c, sourceUrl, status: 402, failureReason: 'Insufficient credits', startedAt, creditsCharged: 0 });
     await auditUsage({ c, auth, endpoint, action: 'proxy_credit_rejected', metadata: { creditCost, balance } });
-    return c.json({ error: 'Insufficient credits', requestId }, 402);
+    return c.json(errorPayload('INSUFFICIENT_CREDITS', 'Insufficient credits', requestId), 402);
   }
 
   let targetUrl;
@@ -47,7 +62,7 @@ export async function handleDynamicProxy(c) {
     targetUrl = await buildSafeTargetUrl(endpoint.target_url, sourceUrl.searchParams);
   } catch (error) {
     await logProxyRequest({ endpoint, auth, c, sourceUrl, status: 502, failureReason: error.message, startedAt, creditsCharged: 0 });
-    return c.json({ error: 'Proxy target is not available', requestId }, 502);
+    return c.json(errorPayload('PROXY_TARGET_UNAVAILABLE', 'Proxy target is not available', requestId), 502);
   }
 
   const controller = new AbortController();
@@ -81,7 +96,7 @@ export async function handleDynamicProxy(c) {
     } catch (error) {
       await logProxyRequest({ endpoint, auth, c, sourceUrl, status: 402, failureReason: error.message, startedAt, creditsCharged: 0 });
       await auditUsage({ c, auth, endpoint, action: 'proxy_credit_rejected', metadata: { creditCost, reason: error.message } });
-      return c.json({ error: 'Insufficient credits', requestId }, 402);
+      return c.json(errorPayload('INSUFFICIENT_CREDITS', 'Insufficient credits', requestId), 402);
     }
   }
 
@@ -89,7 +104,7 @@ export async function handleDynamicProxy(c) {
   await logProxyRequest({ endpoint, auth, c, sourceUrl, status: upstreamResponse?.status || 504, failureReason, startedAt, creditsCharged });
   await auditUsage({ c, auth, endpoint, action: 'proxy_request', metadata: { status: upstreamResponse?.status || 504, creditsCharged, success: Boolean(upstreamResponse) } });
 
-  if (!upstreamResponse) return c.json({ error: failureReason, requestId }, failureReason?.includes('timed out') ? 504 : 502);
+  if (!upstreamResponse) return c.json(errorPayload(failureReason?.includes('timed out') ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_FAILED', failureReason, requestId), failureReason?.includes('timed out') ? 504 : 502);
 
   return new Response(responseBody, {
     status: upstreamResponse.status,
@@ -111,22 +126,28 @@ async function validateProxyAccess(request, endpoint, c) {
   const header = request.headers.get('authorization') || '';
   const rawKey = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : request.headers.get('x-api-key');
   const sourceUrl = new URL(request.url);
-  const fail = async (status, error, extra = {}) => {
-    if (c) await logAuthAttempt({ userId: extra.userId, apiKeyId: extra.apiKeyId, action: 'proxy_auth_failed', reason: error, c }).catch(() => {});
-    return { ok: false, status, error, user: { id: extra.userId }, apiKey: { id: extra.apiKeyId } };
+  const fail = async (status, error, code, extra = {}) => {
+    if (c) {
+      await logAuthAttempt({ userId: extra.userId, apiKeyId: extra.apiKeyId, action: 'proxy_auth_failed', reason: error, c }).catch(() => {});
+      await logSuspiciousUsage({ c, userId: extra.userId, apiKeyId: extra.apiKeyId, endpointId: endpoint.id, reason: code, severity: status === 401 ? 'medium' : 'low', metadata: { ip: clientIp(c) } });
+      const configured = await getSetting('limits.failed_auth_attempts', { window_seconds: 300, max_requests: 20 }).catch(() => ({ window_seconds: 300, max_requests: 20 }));
+      const throttle = await consumeRateLimit({ bucket: `failed_auth_attempts:${clientIp(c)}:${rawKey ? 'invalid' : 'missing'}`, limit: { windowSeconds: Number(configured.window_seconds), max: Number(configured.max_requests) }, c });
+      if (!throttle.allowed) return { ok: false, status: 429, error: 'Too many failed authentication attempts', code: ERROR_CODES.AUTH_THROTTLED, user: { id: extra.userId }, apiKey: { id: extra.apiKeyId }, resetSeconds: throttle.resetSeconds };
+    }
+    return { ok: false, status, error, code, user: { id: extra.userId }, apiKey: { id: extra.apiKeyId } };
   };
-  if (!rawKey) return fail(401, 'API key required');
+  if (!rawKey) return fail(401, 'API key required', ERROR_CODES.API_KEY_REQUIRED);
   const result = await query(`select k.id, k.user_id, u.username, u.status as user_status, u.wildcard_domains_enabled from api_keys k join users u on u.id = k.user_id where k.key_hash = $1 and k.status = 'active'`, [hashApiKey(rawKey)]);
   const row = result.rows[0];
-  if (!row) return fail(401, 'Invalid API key');
-  if (row.user_status !== 'active') return fail(403, row.user_status === 'suspended' ? 'User suspended' : 'User inactive', { userId: row.user_id, apiKeyId: row.id });
+  if (!row) return fail(401, 'Invalid API key', ERROR_CODES.INVALID_API_KEY);
+  if (row.user_status !== 'active') return fail(403, row.user_status === 'suspended' ? 'User suspended' : 'User inactive', 'USER_INACTIVE', { userId: row.user_id, apiKeyId: row.id });
   const domain = request.headers.get('origin') || request.headers.get('referer') || request.headers.get('host') || '';
   const domainBehavior = await getSetting('security.domain_allowlist_behavior', 'enforce');
   const wildcardAllowed = domainBehavior === 'allow_wildcard_per_user' && row.wildcard_domains_enabled;
   if (domainBehavior !== 'disabled' && !wildcardAllowed) {
     const domains = await query(`select domain from allowed_domains where user_id = $1 and status = 'active'`, [row.user_id]);
     if (domains.rowCount === 0 || !domains.rows.some((d) => domainMatches(domain, d.domain))) {
-      return fail(403, 'Domain is not allowed', { userId: row.user_id, apiKeyId: row.id });
+      return fail(403, 'Domain is not allowed', ERROR_CODES.DOMAIN_NOT_ALLOWED, { userId: row.user_id, apiKeyId: row.id });
     }
   }
   return { ok: true, user: { id: row.user_id, username: row.username }, apiKey: { id: row.id } };
