@@ -16,6 +16,7 @@
     "hono": "latest",
     "ioredis": "latest",
     "pg": "latest",
+    "stripe": "^22.3.0",
     "zod": "latest"
   },
   "devDependencies": {
