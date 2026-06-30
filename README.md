@@ -1,8 +1,6 @@
 # QuickRest
 
-<p align="center">
-  <img src="quickrest.png" alt="Logo" width="600">
-</p>
+![description](https://github.com/codyaboyd/quickrest/blob/main/quickrest.png?raw=true)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-black.svg)](https://bun.sh/)
