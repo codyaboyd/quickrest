@@ -114,3 +114,36 @@ body {
     padding-right: .5rem;
   }
 }
+
+.docs-hero {
+  background: var(--quickrest-hero);
+}
+
+.docs-shell {
+  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+}
+
+.docs-endpoint-card {
+  border: 1px solid rgba(148, 163, 184, .28);
+  border-radius: 1.25rem;
+}
+
+.code-snippet {
+  position: relative;
+}
+
+.code-snippet .btn {
+  position: absolute;
+  right: .75rem;
+  top: .75rem;
+  z-index: 1;
+}
+
+.code-snippet pre {
+  background: #0f172a;
+  border-radius: .9rem;
+  color: #bfdbfe;
+  margin: 0;
+  overflow-x: auto;
+  padding: 3rem 1rem 1rem;
+}

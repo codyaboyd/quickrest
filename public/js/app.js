@@ -1,8 +1,12 @@
 document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('[data-copy]').forEach((button) => {
+  document.querySelectorAll('[data-copy], [data-copy-target]').forEach((button) => {
     button.addEventListener('click', async () => {
-      await navigator.clipboard.writeText(button.dataset.copy);
+      const target = button.dataset.copyTarget ? document.getElementById(button.dataset.copyTarget) : null;
+      const text = target ? target.textContent : button.dataset.copy;
+      await navigator.clipboard.writeText(text || '');
+      const original = button.textContent;
       button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = original; }, 1600);
     });
   });
 
