@@ -1,10 +1,9 @@
-import dns from 'node:dns/promises';
-import net from 'node:net';
 import { query } from '../db/postgres.js';
 import { getSetting } from './adminSettingsService.js';
 import { deductEndpointCredits, ensureCreditBalance } from './creditService.js';
-import { hashApiKey, domainMatches, logAuthAttempt } from './apiKeyService.js';
+import { apiKeyHashCandidates, domainMatches, logAuthAttempt } from './apiKeyService.js';
 import { ERROR_CODES, enforceIpAccess, enforceProxyRateLimits, errorPayload, logSuspiciousUsage, clientIp, consumeRateLimit } from './apiProtectionService.js';
+import { assertPublicHttpUrl } from './security.js';
 
 const SUPPORTED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const HOP_BY_HOP_HEADERS = new Set([
@@ -78,8 +77,13 @@ export async function handleDynamicProxy(c) {
       headers: buildForwardHeaders(c.req.raw.headers, endpoint.headers_config),
       body: ['GET'].includes(method) ? undefined : c.req.raw.body,
       signal: controller.signal,
-      duplex: method === 'GET' ? undefined : 'half'
+      duplex: method === 'GET' ? undefined : 'half',
+      redirect: 'manual'
     });
+    if ([301, 302, 303, 307, 308].includes(upstreamResponse.status)) {
+      const location = upstreamResponse.headers.get('location');
+      if (location) await assertPublicHttpUrl(new URL(location, targetUrl).toString());
+    }
     contentType = upstreamResponse.headers.get('content-type') || contentType;
     responseBody = await upstreamResponse.arrayBuffer();
   } catch (error) {
@@ -137,7 +141,7 @@ async function validateProxyAccess(request, endpoint, c) {
     return { ok: false, status, error, code, user: { id: extra.userId }, apiKey: { id: extra.apiKeyId } };
   };
   if (!rawKey) return fail(401, 'API key required', ERROR_CODES.API_KEY_REQUIRED);
-  const result = await query(`select k.id, k.user_id, u.username, u.status as user_status, u.wildcard_domains_enabled from api_keys k join users u on u.id = k.user_id where k.key_hash = $1 and k.status = 'active'`, [hashApiKey(rawKey)]);
+  const result = await query(`select k.id, k.user_id, u.username, u.status as user_status, u.wildcard_domains_enabled from api_keys k join users u on u.id = k.user_id where k.key_hash = any($1::text[]) and k.status = 'active'`, [apiKeyHashCandidates(rawKey)]);
   const row = result.rows[0];
   if (!row) return fail(401, 'Invalid API key', ERROR_CODES.INVALID_API_KEY);
   if (row.user_status !== 'active') return fail(403, row.user_status === 'suspended' ? 'User suspended' : 'User inactive', 'USER_INACTIVE', { userId: row.user_id, apiKeyId: row.id });
@@ -182,34 +186,13 @@ async function buildSafeTargetUrl(rawTargetUrl, searchParams) {
   if (!['http:', 'https:'].includes(targetUrl.protocol)) throw new Error('Unsupported target URL protocol');
   if (targetUrl.username || targetUrl.password) throw new Error('Target URL credentials are not allowed');
   searchParams.forEach((value, key) => targetUrl.searchParams.append(key, value));
-  await assertSafeTargetHost(targetUrl.hostname);
+  if (!(await getAllowInternalTargets())) await assertPublicHttpUrl(targetUrl.toString());
   return targetUrl;
-}
-
-async function assertSafeTargetHost(hostname) {
-  const allowInternal = await getAllowInternalTargets();
-  const addresses = net.isIP(hostname) ? [{ address: hostname }] : await dns.lookup(hostname, { all: true, verbatim: true });
-  if (!allowInternal && addresses.some(({ address }) => isPrivateAddress(address))) {
-    throw new Error('Target URL resolves to a blocked private address');
-  }
 }
 
 async function getAllowInternalTargets() {
   const result = await query(`select value from admin_settings where key = 'proxy.allow_internal_targets' limit 1`);
   return result.rows[0]?.value === true || result.rows[0]?.value?.enabled === true;
-}
-
-function isPrivateAddress(address) {
-  if (net.isIPv4(address)) {
-    const parts = address.split('.').map(Number);
-    return parts[0] === 10 || parts[0] === 127 || parts[0] === 0 ||
-      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
-      (parts[0] === 192 && parts[1] === 168) ||
-      (parts[0] === 169 && parts[1] === 254) ||
-      (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127);
-  }
-  const normalized = address.toLowerCase();
-  return normalized === '::1' || normalized === '::' || normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe80:');
 }
 
 async function logProxyRequest({ endpoint, auth, c, sourceUrl, status, failureReason, startedAt, creditsCharged }) {

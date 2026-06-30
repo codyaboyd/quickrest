@@ -3,6 +3,7 @@ import { html } from 'hono/html';
 import { getCookie } from 'hono/cookie';
 import { requireAuth } from '../middleware/auth.js';
 import { CSRF_COOKIE } from '../services/authService.js';
+import { safeEqualString } from '../services/security.js';
 import { layout } from '../templates/layout.js';
 import { activeCreditPackages, createCheckoutSession, getStripe, processStripeEvent, requireStripeWebhookSecret } from '../services/stripeBillingService.js';
 
@@ -11,7 +12,7 @@ export const billing = new Hono();
 function escapeHtml(value = '') { return String(value).replace(/[&<>\"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[ch])); }
 function render(c, title, children) { return c.html(html`${layout({ title, children, user: c.get('user') })}`); }
 async function body(c) { return c.req.header('content-type')?.includes('application/json') ? c.req.json() : c.req.parseBody(); }
-function csrfOk(c, data) { const token = getCookie(c, CSRF_COOKIE); return token && token === data.csrfToken; }
+function csrfOk(c, data) { const token = getCookie(c, CSRF_COOKIE); return token && safeEqualString(token, data.csrfToken); }
 
 billing.post('/create-checkout-session', requireAuth, async (c) => {
   const data = await body(c);
@@ -51,6 +52,6 @@ stripeWebhook.post('/stripe', async (c) => {
     const result = await processStripeEvent(event);
     return c.json({ received: true, ...result });
   } catch (error) {
-    return c.json({ error: error.message }, 400);
+    return c.json({ error: 'Invalid Stripe webhook signature' }, 400);
   }
 });

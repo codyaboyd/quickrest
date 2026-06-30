@@ -14,9 +14,11 @@ import { customer } from './routes/customer.js';
 import { admin } from './routes/admin.js';
 import { billing, stripeWebhook } from './routes/billing.js';
 import { handleDynamicProxy } from './services/proxyEngine.js';
+import { securityHeaders } from './services/security.js';
 
 const app = new Hono();
 
+app.use('*', securityHeaders());
 app.use('*', requestLogger);
 app.use('/api/*', rateLimit());
 app.route('/webhooks', stripeWebhook);
@@ -43,7 +45,7 @@ app.notFound((c) => c.json({ error: 'Not found', requestId: c.get('requestId') }
 app.onError((error, c) => {
   const requestId = c.get('requestId');
   if (error instanceof HTTPException) {
-    return c.json({ error: error.message, requestId }, error.status);
+    return c.json({ error: error.status >= 500 && isProduction ? 'Internal server error' : error.message, requestId }, error.status);
   }
 
   console.error('Unhandled error', { requestId, error });

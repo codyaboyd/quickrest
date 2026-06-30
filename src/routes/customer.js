@@ -4,13 +4,14 @@ import { getCookie } from 'hono/cookie';
 import { query } from '../db/postgres.js';
 import { CSRF_COOKIE } from '../services/authService.js';
 import { requireAuth } from '../middleware/auth.js';
+import { safeEqualString } from '../services/security.js';
 import { ensureUserApiKey, rotateApiKey, normalizeDomain } from '../services/apiKeyService.js';
 
 export const customer = new Hono();
 customer.use('*', requireAuth);
 
 async function formBody(c) { return c.req.header('content-type')?.includes('application/json') ? c.req.json() : c.req.parseBody(); }
-function csrfOk(c, body) { return getCookie(c, CSRF_COOKIE) && getCookie(c, CSRF_COOKIE) === body.csrfToken; }
+function csrfOk(c, body) { return getCookie(c, CSRF_COOKIE) && safeEqualString(getCookie(c, CSRF_COOKIE), body.csrfToken); }
 function redirectBack(c, path) { return c.redirect(path, 303); }
 
 customer.post('/api-key/ensure', async (c) => {
@@ -28,20 +29,20 @@ customer.post('/api-key/rotate', async (c) => {
   return c.json({ apiKey: result.rawKey, message: 'Store this API key now. It will only be shown once.' }, 201);
 });
 
-const domainSchema = z.string().trim().min(3).max(253);
+const domainSchema = z.string().trim().min(3).max(253).transform(normalizeDomain).refine((d) => /^(\*\.)?([a-z0-9-]+\.)+[a-z]{2,63}$/.test(d), 'Invalid domain');
 customer.post('/domains', async (c) => {
   const body = await formBody(c);
   if (!csrfOk(c, body)) return c.json({ error: 'Invalid CSRF token' }, 403);
   const parsed = domainSchema.safeParse(body.domain);
   if (!parsed.success) return c.json({ error: 'Invalid domain' }, 400);
-  await query('insert into allowed_domains (user_id, domain) values ($1, $2) on conflict (user_id, domain) do update set status = excluded.status', [c.get('user').id, normalizeDomain(parsed.data)]);
+  await query('insert into allowed_domains (user_id, domain) values ($1, $2) on conflict (user_id, domain) do update set status = excluded.status', [c.get('user').id, parsed.data]);
   return redirectBack(c, '/domains');
 });
 
 customer.post('/domains/:id', async (c) => {
   const body = await formBody(c);
   if (!csrfOk(c, body)) return c.json({ error: 'Invalid CSRF token' }, 403);
-  const domain = normalizeDomain(domainSchema.parse(body.domain));
+  const domain = domainSchema.parse(body.domain);
   await query('update allowed_domains set domain = $1, status = $2 where id = $3 and user_id = $4', [domain, body.status === 'disabled' ? 'disabled' : 'active', c.req.param('id'), c.get('user').id]);
   return redirectBack(c, '/domains');
 });

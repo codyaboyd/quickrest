@@ -1,6 +1,6 @@
 import { env } from '../config/env.js';
 import { query } from '../db/postgres.js';
-import { hashApiKey, domainMatches, logAuthAttempt } from './apiKeyService.js';
+import { apiKeyHashCandidates, domainMatches, logAuthAttempt } from './apiKeyService.js';
 import { clientIp } from './apiProtectionService.js';
 
 const demoServices = new Map([
@@ -73,7 +73,7 @@ async function validateProxyAccess(request, serviceSlug, c) {
     return { ok: false, status, error };
   };
   if (!rawKey) return fail(401, 'API key required');
-  const result = await query(`select k.id, k.user_id, u.username, u.status as user_status, u.wildcard_domains_enabled from api_keys k join users u on u.id = k.user_id where k.key_hash = $1 and k.status = 'active'`, [hashApiKey(rawKey)]);
+  const result = await query(`select k.id, k.user_id, u.username, u.status as user_status, u.wildcard_domains_enabled from api_keys k join users u on u.id = k.user_id where k.key_hash = any($1::text[]) and k.status = 'active'`, [apiKeyHashCandidates(rawKey)]);
   const row = result.rows[0];
   if (!row) return fail(401, 'Invalid API key');
   if (row.user_status !== 'active') return fail(403, row.user_status === 'suspended' ? 'User suspended' : 'User inactive', { userId: row.user_id, apiKeyId: row.id });

@@ -8,6 +8,7 @@ import { redis } from '../lib/redis.js';
 import { ensureUserApiKey } from '../services/apiKeyService.js';
 import { ensureCreditBalance, adjustCredits } from '../services/creditService.js';
 import { getSetting } from '../services/adminSettingsService.js';
+import { safeEqualString } from '../services/security.js';
 import { ERROR_CODES, clientIp, enforceNamedThrottle, errorPayload, logSuspiciousUsage } from '../services/apiProtectionService.js';
 
 export const auth = new Hono();
@@ -20,7 +21,7 @@ const pinSchema = z.string().trim().regex(/^\d{4,12}$/, 'Use a 4-12 digit recove
 function csrfOk(c, body) {
   const cookieToken = getCookie(c, CSRF_COOKIE);
   const token = c.req.header('x-csrf-token') || body?.csrfToken;
-  return Boolean(cookieToken && token && cookieToken === token);
+  return Boolean(cookieToken && token && safeEqualString(cookieToken, token));
 }
 
 function wantsHtml(c) {
