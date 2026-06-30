@@ -51,7 +51,46 @@ pages.get('/logout', requireAuth, (c) => render(c, 'Logout', `<div class="contai
 
 pages.get('/account', requireAuth, (c) => render(c, 'Account settings', `<div class="container py-5"><h1 class="fw-bold">Account settings</h1><div class="card shadow-sm"><div class="card-body"><dl class="row mb-0"><dt class="col-sm-3">Username</dt><dd class="col-sm-9">${escapeHtml(c.get('user').username)}</dd><dt class="col-sm-3">Email</dt><dd class="col-sm-9">${escapeHtml(c.get('user').email)}</dd><dt class="col-sm-3">Role</dt><dd class="col-sm-9"><span class="badge text-bg-secondary">${escapeHtml(c.get('user').role)}</span></dd><dt class="col-sm-3">Status</dt><dd class="col-sm-9">${escapeHtml(c.get('user').status)}</dd></dl></div></div></div>`));
 
-function nav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/dashboard">Customer dashboard</a><a class="list-group-item" href="/api-key">API key</a><a class="list-group-item" href="/domains">Allowed domains</a><a class="list-group-item" href="/credits">Credits & billing</a><a class="list-group-item" href="/usage">Usage logs</a><a class="list-group-item" href="/account">Account settings</a></div>`; }
+
+function endpointDescription(endpoint) {
+  return endpoint.description || `Send authenticated ${endpoint.http_method} requests through the QuickRest gateway.`;
+}
+
+function requiredHeaders(endpoint) {
+  const configured = Array.isArray(endpoint.headers_config?.forwardHeaders) ? endpoint.headers_config.forwardHeaders : [];
+  return ['Authorization: Bearer <api_key>', ...configured.filter((name) => !['authorization', 'x-api-key', 'cookie'].includes(String(name).toLowerCase())).map((name) => `${name}: <value>`)];
+}
+
+function examplePayload(method) {
+  return ['POST', 'PUT', 'PATCH'].includes(method) ? ` \\\n  -H "Content-Type: application/json" \\\n  -d '{"example":"value"}'` : '';
+}
+
+function endpointDocsCard(endpoint, apiBaseUrl, apiKey) {
+  const url = `${apiBaseUrl}${endpoint.public_path}`;
+  const request = `curl -X ${endpoint.http_method} "${url}" \\\n  -H "Authorization: Bearer ${apiKey}"${examplePayload(endpoint.http_method)}`;
+  const response = `{
+  "status": "proxied response placeholder",
+  "requestId": "req_example",
+  "data": {}
+}`;
+  const headers = requiredHeaders(endpoint).map((header) => `<span class="badge text-bg-light border me-1 mb-1">${escapeHtml(header)}</span>`).join('');
+  return `<div class="card docs-endpoint-card shadow-sm mb-4"><div class="card-body p-4"><div class="d-flex justify-content-between align-items-start gap-3 flex-wrap"><div><span class="badge text-bg-primary me-2">${escapeHtml(endpoint.http_method)}</span><code>${escapeHtml(endpoint.public_path)}</code><h2 class="h5 mt-3 mb-2">${escapeHtml(endpointDescription(endpoint))}</h2></div><div class="text-end"><div class="small text-muted">Credit cost</div><div class="display-6 fw-bold">${Number(endpoint.credit_cost).toLocaleString()}</div></div></div><hr><div class="row g-4"><div class="col-lg-6"><h3 class="h6">Required headers</h3><div class="mb-3">${headers}</div><h3 class="h6">Example request</h3><div class="code-snippet"><button class="btn btn-sm btn-outline-light" data-copy-target="request-${endpoint.id}">Copy</button><pre><code id="request-${endpoint.id}">${escapeHtml(request)}</code></pre></div></div><div class="col-lg-6"><h3 class="h6">Example response placeholder</h3><div class="code-snippet"><button class="btn btn-sm btn-outline-light" data-copy-target="response-${endpoint.id}">Copy</button><pre><code id="response-${endpoint.id}">${escapeHtml(response)}</code></pre></div><p class="small text-muted mt-3 mb-0">Backend target URLs are intentionally hidden. QuickRest proxies this public path to the configured upstream service.</p></div></div></div></div>`;
+}
+
+pages.get('/docs', (c) => render(c, 'API documentation', `
+<section class="docs-hero text-white"><div class="container py-5"><div class="row align-items-center g-4"><div class="col-lg-8"><span class="badge text-bg-light text-primary mb-3">Public documentation</span><h1 class="display-5 fw-bold">One documented gateway for every paid API.</h1><p class="lead text-white-50">QuickRest provides a credit-metered API proxy, API-key authentication, domain controls, rate limits, billing, and usage analytics without exposing upstream backend URLs to customers.</p><div class="d-flex gap-3 flex-wrap mt-4"><a class="btn btn-light btn-lg" href="/docs/endpoints">View authenticated endpoint docs</a><a class="btn btn-outline-light btn-lg" href="/signup">Create account</a></div></div><div class="col-lg-4"><div class="card bg-dark border-primary"><div class="card-body"><p class="text-uppercase small text-primary-emphasis mb-2">Base URL</p><code class="text-info">${escapeHtml(env.APP_URL.replace(/\/$/, ''))}</code><hr class="border-secondary"><p class="small text-white-50 mb-0">Use your public paths with an API key. The upstream target remains private.</p></div></div></div></div></div></section>
+<section class="container py-5"><div class="row g-4"><div class="col-md-4"><div class="card h-100 shadow-sm"><div class="card-body"><h2 class="h5">Authentication</h2><p class="text-muted mb-0">Send <code>Authorization: Bearer qrst_...</code> or <code>X-API-Key</code> with every endpoint request.</p></div></div></div><div class="col-md-4"><div class="card h-100 shadow-sm"><div class="card-body"><h2 class="h5">Credits</h2><p class="text-muted mb-0">Each endpoint declares its credit cost. Successful proxy calls deduct credits from your account balance.</p></div></div></div><div class="col-md-4"><div class="card h-100 shadow-sm"><div class="card-body"><h2 class="h5">Protected upstreams</h2><p class="text-muted mb-0">Documentation displays only public gateway paths, methods, request headers, and examples—not target backend URLs.</p></div></div></div></div></section>`));
+
+pages.get('/docs/endpoints', requireAuth, async (c) => {
+  const endpoints = await query(`select id, public_path, http_method, headers_config, credit_cost, description from proxy_endpoints where is_enabled = true order by public_path, http_method`);
+  const keys = await query('select key_prefix from api_keys where user_id = $1 and status = $2 order by created_at desc limit 1', [c.get('user').id, 'active']);
+  const apiKey = keys.rows[0]?.key_prefix ? `${keys.rows[0].key_prefix}...` : 'qrst_your_api_key';
+  const apiBaseUrl = env.APP_URL.replace(/\/$/, '');
+  const cards = endpoints.rows.map((endpoint) => endpointDocsCard(endpoint, apiBaseUrl, apiKey)).join('') || '<div class="alert alert-info">No enabled endpoints are available yet.</div>';
+  return render(c, 'Authenticated API docs', `<div class="docs-shell"><div class="container py-5"><div class="d-flex justify-content-between align-items-start gap-3 flex-wrap mb-4"><div><span class="badge text-bg-primary mb-2">Authenticated documentation</span><h1 class="fw-bold">Available endpoints</h1><p class="text-muted mb-0">These are the public gateway paths available to your account. Target backend URLs are never shown.</p></div><a class="btn btn-outline-primary" href="/api-key">Manage API key</a></div>${nav()}<div class="alert alert-secondary"><strong>Base URL:</strong> <code>${escapeHtml(apiBaseUrl)}</code> · Include your API key in every request.</div>${cards}</div></div>`);
+});
+
+function nav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/dashboard">Customer dashboard</a><a class="list-group-item" href="/docs/endpoints">API docs</a><a class="list-group-item" href="/api-key">API key</a><a class="list-group-item" href="/domains">Allowed domains</a><a class="list-group-item" href="/credits">Credits & billing</a><a class="list-group-item" href="/usage">Usage logs</a><a class="list-group-item" href="/account">Account settings</a></div>`; }
 
 pages.get('/dashboard', requireAuth, async (c) => {
   const userId = c.get('user').id;
