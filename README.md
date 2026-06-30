@@ -18,7 +18,7 @@ QuickRest is a full-stack SaaS starter for a paid API proxy platform. It combine
 - `/health` endpoint that checks PostgreSQL and Redis
 - Redis-backed API rate limiting middleware
 - Demo proxy endpoints at `/api/proxy/:service`
-- PostgreSQL connection pool and migration script for tenants, services, API keys, and usage events
+- PostgreSQL connection pool and versioned migrations for users, API keys, proxy endpoints, credit ledgers, Stripe billing records, admin settings, audit logs, and password resets
 - Docker Compose for local PostgreSQL and Redis
 - Secure `.env.example` with required configuration
 
@@ -35,6 +35,8 @@ QuickRest is a full-stack SaaS starter for a paid API proxy platform. It combine
     ├── config/env.js
     ├── db/
     │   ├── migrate.js
+    │   ├── migrations/
+    │   │   └── 001_initial_credit_saas_schema.sql
     │   └── postgres.js
     ├── lib/redis.js
     ├── middleware/
@@ -118,7 +120,7 @@ Open <http://localhost:3000>.
 ## Next build steps
 
 1. Add authenticated tenant signup and dashboard login.
-2. Store upstream services in PostgreSQL instead of the in-memory demo registry.
+2. Wire the proxy registry to the `proxy_endpoints` and `endpoint_credit_rules` tables.
 3. Hash and validate customer API keys before proxying.
-4. Deduct credits transactionally when upstream requests succeed.
-5. Add Stripe or another payment provider for paid credit purchases.
+4. Deduct credits transactionally through `credit_balances` and `credit_transactions`.
+5. Process Stripe checkout and webhook records into paid credit purchases.
