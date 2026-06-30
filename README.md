@@ -71,27 +71,43 @@ cp .env.example .env
 
 Update `SESSION_SECRET` in `.env` to a long random value before using the app outside local development.
 
-### 3. Start infrastructure
+### 3. Start the full local system
 
 ```bash
-docker compose up -d
+bun start
 ```
 
-This starts PostgreSQL on `localhost:5432` and Redis on `localhost:6379`.
+`bun start` is the one-command local startup path. It creates `.env` from `.env.example` when needed, starts PostgreSQL and Redis with Docker Compose, waits for both services to accept connections, applies database migrations, and then starts the Bun HTTP server.
 
-### 4. Run migrations
+Open <http://localhost:3000>.
 
-```bash
-bun run db:migrate
-```
-
-### 5. Start the application
+For hot-reload development after PostgreSQL and Redis are already running, use:
 
 ```bash
 bun run dev
 ```
 
-Open <http://localhost:3000>.
+
+### Running in a persistent screen session
+
+On a VPS or long-lived shell, start QuickRest in a named `screen` session so it keeps running after you disconnect:
+
+```bash
+screen -S quickrest
+bun start
+```
+
+Detach from the session with `Ctrl+A`, then `D`. Reattach later with:
+
+```bash
+screen -r quickrest
+```
+
+If you only want to run the HTTP server without starting Docker Compose or applying migrations, use:
+
+```bash
+bun run start:app
+```
 
 ## Useful endpoints
 
