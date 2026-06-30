@@ -6,6 +6,7 @@ import { query } from '../db/postgres.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { CSRF_COOKIE } from '../services/authService.js';
 import { layout } from '../templates/layout.js';
+import { adjustCredits, usageSummary } from '../services/creditService.js';
 
 export const admin = new Hono();
 admin.use('*', requireAdmin);
@@ -50,7 +51,7 @@ function parseCustomHeaders(raw) {
 function parseRequestHeaders(raw) { return parseCustomHeaders(raw); }
 function headersConfig(data) { return { forwardHeaders: parseHeaderNames(data.forwardHeaders), customHeaders: parseCustomHeaders(data.customHeaders) }; }
 function csrf(c) { return getCookie(c, CSRF_COOKIE) || ''; }
-function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
+function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
 function errorBlock(errors) { return errors?.length ? `<div class="alert alert-danger"><strong>Fix these issues:</strong><ul class="mb-0">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>` : ''; }
 function endpointForm(c, action, endpoint = {}, errors = []) {
   const config = endpoint.headers_config || {};
@@ -101,6 +102,37 @@ admin.post('/endpoints', (c) => saveEndpoint(c));
 admin.post('/endpoints/:id', (c) => saveEndpoint(c, c.req.param('id')));
 admin.post('/endpoints/:id/toggle', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('update proxy_endpoints set is_enabled = not is_enabled, updated_by = $2 where id = $1', [c.req.param('id'), c.get('user').id]); return c.redirect(`/admin/endpoints/${c.req.param('id')}`, 303); });
 admin.post('/endpoints/:id/delete', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('delete from proxy_endpoints where id = $1', [c.req.param('id')]); return c.redirect('/admin/endpoints', 303); });
+
+const creditAdjustSchema = z.object({ userId: z.string().uuid(), amount: z.coerce.number().int().min(-1000000).max(1000000).refine(v => v !== 0), description: z.string().trim().max(1000).optional().default('Admin credit adjustment') });
+
+admin.get('/credits', async (c) => {
+  const [balances, transactions, day, endpoint, user] = await Promise.all([
+    query(`select u.id, u.email, u.username, coalesce(b.balance,0)::int balance, coalesce(b.lifetime_purchased,0)::int lifetime_purchased, coalesce(b.lifetime_used,0)::int lifetime_used from users u left join credit_balances b on b.user_id = u.id and b.currency = 'credits' order by u.created_at desc limit 100`),
+    query(`select t.created_at, u.email, t.transaction_type, t.amount, t.balance_after, t.stripe_reference, t.request_id, t.description from credit_transactions t join users u on u.id = t.user_id order by t.created_at desc limit 200`),
+    usageSummary({ groupBy: 'day', limit: 30 }), usageSummary({ groupBy: 'endpoint', limit: 30 }), usageSummary({ groupBy: 'user', limit: 30 })
+  ]);
+  const options = balances.rows.map(u => `<option value="${u.id}">${escapeHtml(u.email)} (${u.balance})</option>`).join('');
+  const balanceRows = balances.rows.map(u => `<tr><td>${escapeHtml(u.email)}</td><td>${escapeHtml(u.username)}</td><td>${u.balance}</td><td>${u.lifetime_purchased}</td><td>${u.lifetime_used}</td></tr>`).join('');
+  const txRows = transactions.rows.map(t => `<tr><td>${t.created_at}</td><td>${escapeHtml(t.email)}</td><td>${escapeHtml(t.transaction_type)}</td><td>${t.amount}</td><td>${t.balance_after ?? ''}</td><td>${escapeHtml(t.stripe_reference || t.request_id || '')}</td><td>${escapeHtml(t.description || '')}</td></tr>`).join('');
+  const summary = (title, rows) => `<div class="col-lg-4"><div class="card h-100"><div class="card-body"><h2 class="h5">${title}</h2><table class="table table-sm"><thead><tr><th>Bucket</th><th>Requests</th><th>Credits</th></tr></thead><tbody>${rows.map(r => `<tr><td>${escapeHtml(r.bucket)}</td><td>${r.transactions}</td><td>${r.credits}</td></tr>`).join('')}</tbody></table></div></div></div>`;
+  return render(c, 'Credits admin', `<div class="container py-5"><h1 class="fw-bold">Credits & transactions</h1>${adminNav()}<div class="card mb-4"><div class="card-body"><h2 class="h5">Manual adjustment</h2><form class="row g-2" method="post" action="/admin/credits/adjust"><input type="hidden" name="csrfToken" value="${csrf(c)}"><div class="col-md-4"><select class="form-select" name="userId">${options}</select></div><div class="col-md-2"><input class="form-control" type="number" name="amount" placeholder="+/- credits" required></div><div class="col-md-4"><input class="form-control" name="description" value="Admin credit adjustment"></div><div class="col-md-2"><button class="btn btn-primary w-100">Apply</button></div></form></div></div><div class="row g-4 mb-4">${summary('By day', day)}${summary('By endpoint', endpoint)}${summary('By user', user)}</div><h2 class="h5">Balances</h2><div class="table-responsive"><table class="table"><thead><tr><th>Email</th><th>User</th><th>Balance</th><th>Purchased</th><th>Used</th></tr></thead><tbody>${balanceRows}</tbody></table></div><h2 class="h5 mt-4">All transactions</h2><div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>User</th><th>Type</th><th>Amount</th><th>Balance after</th><th>Reference</th><th>Description</th></tr></thead><tbody>${txRows}</tbody></table></div></div>`);
+});
+
+admin.post('/credits/adjust', async (c) => {
+  const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  const parsed = creditAdjustSchema.safeParse(data); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
+  try { await adjustCredits({ userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description, createdBy: c.get('user').id }); }
+  catch (error) { return c.json({ error: error.message }, 400); }
+  return c.redirect('/admin/credits', 303);
+});
+
+admin.get('/api/credits/transactions', async (c) => c.json({ transactions: (await query(`select * from credit_transactions order by created_at desc limit 500`)).rows }));
+admin.post('/api/credits/adjust', async (c) => {
+  const parsed = creditAdjustSchema.safeParse(await body(c)); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
+  try { return c.json(await adjustCredits({ userId: parsed.data.userId, amount: parsed.data.amount, description: parsed.data.description, createdBy: c.get('user').id })); }
+  catch (error) { return c.json({ error: error.message }, 400); }
+});
+
 admin.get('/test', (c) => render(c, 'Test proxy endpoint', `<div class="container py-5"><h1 class="fw-bold">Test proxy endpoint</h1>${adminNav()}<form method="post" action="/admin/test"><input type="hidden" name="csrfToken" value="${csrf(c)}"><div class="row g-3"><div class="col-md-8"><label class="form-label">Proxy path</label><input class="form-control" name="requestPath" value="/api/proxy/new"></div><div class="col-md-4"><label class="form-label">Method</label><select class="form-select" name="method">${METHODS.map(m => `<option>${m}</option>`).join('')}</select></div><div class="col-md-6"><label class="form-label">Headers JSON</label><textarea class="form-control font-monospace" name="headers" rows="5">{}</textarea></div><div class="col-md-6"><label class="form-label">Body</label><textarea class="form-control font-monospace" name="body" rows="5"></textarea></div></div><button class="btn btn-primary mt-3">Run test</button></form></div>`));
 admin.post('/test', async (c) => {
   const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);

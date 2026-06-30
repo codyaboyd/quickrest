@@ -65,9 +65,9 @@ pages.get('/domains', requireAuth, async (c) => {
 
 pages.get('/credits', requireAuth, async (c) => {
   const b = (await query('select balance, lifetime_purchased, lifetime_used from credit_balances where user_id = $1', [c.get('user').id])).rows[0] || { balance: 0, lifetime_purchased: 0, lifetime_used: 0 };
-  const purchases = await query(`select amount, balance_after, stripe_reference, description, created_at from credit_transactions where user_id = $1 and transaction_type = 'purchase' order by created_at desc limit 50`, [c.get('user').id]);
-  const rows = purchases.rows.map(p => `<tr><td>${p.amount}</td><td>${p.balance_after ?? ''}</td><td>${escapeHtml(p.stripe_reference || '')}</td><td>${escapeHtml(p.description || '')}</td><td>${p.created_at}</td></tr>`).join('');
-  return render(c, 'Credits', `<div class="container py-5"><h1 class="fw-bold">Credits</h1>${nav()}<div class="card mb-4"><div class="card-body"><h2>${b.balance} credits</h2><p class="text-muted">Lifetime purchased: ${b.lifetime_purchased}. Lifetime used: ${b.lifetime_used}.</p></div></div><h2 class="h5">Purchase history</h2><table class="table"><thead><tr><th>Amount</th><th>Balance after</th><th>Reference</th><th>Description</th><th>Date</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+  const txs = await query(`select transaction_type, amount, balance_after, stripe_reference, request_id, description, created_at from credit_transactions where user_id = $1 order by created_at desc limit 100`, [c.get('user').id]);
+  const rows = txs.rows.map(t => `<tr><td>${t.created_at}</td><td><span class="badge text-bg-secondary">${escapeHtml(t.transaction_type)}</span></td><td>${t.amount}</td><td>${t.balance_after ?? ''}</td><td>${escapeHtml(t.stripe_reference || t.request_id || '')}</td><td>${escapeHtml(t.description || '')}</td></tr>`).join('');
+  return render(c, 'Credits', `<div class="container py-5"><h1 class="fw-bold">Credits</h1>${nav()}<div class="card mb-4"><div class="card-body"><h2>${b.balance} credits</h2><p class="text-muted">Lifetime purchased: ${b.lifetime_purchased}. Lifetime used: ${b.lifetime_used}.</p></div></div><h2 class="h5">Credit history</h2><div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Balance after</th><th>Reference</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table></div></div>`);
 });
 
 pages.get('/usage', requireAuth, async (c) => {
