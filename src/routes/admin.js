@@ -10,6 +10,7 @@ import { adjustCredits, usageSummary } from '../services/creditService.js';
 import { rotateApiKey } from '../services/apiKeyService.js';
 import { definitionMap, getAdminSettings, updateSetting } from '../services/adminSettingsService.js';
 import { env } from '../config/env.js';
+import { assertPublicHttpUrl, safeEqualString } from '../services/security.js';
 
 export const admin = new Hono();
 admin.use('*', requireAdmin);
@@ -39,9 +40,13 @@ const testSchema = z.object({
 
 function escapeHtml(value = '') { return String(value).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
 function render(c, title, children) { return c.html(html`${layout({ title, children, user: c.get('user') })}`); }
-async function body(c) { return c.req.header('content-type')?.includes('application/json') ? c.req.json() : c.req.parseBody(); }
+async function body(c) {
+  const parsed = c.get('parsedBody');
+  if (parsed) return parsed;
+  return c.req.header('content-type')?.includes('application/json') ? c.req.json() : c.req.parseBody();
+}
 function wantsJson(c) { return (c.req.header('accept') || '').includes('application/json') || c.req.header('content-type')?.includes('application/json'); }
-function csrfOk(c, data) { const token = getCookie(c, CSRF_COOKIE); return token && token === data.csrfToken; }
+function csrfOk(c, data = {}) { const token = getCookie(c, CSRF_COOKIE); const submitted = c.req.header('x-csrf-token') || data.csrfToken; return token && submitted && safeEqualString(token, submitted); }
 function parseHeaderNames(raw) { return raw.split(/[\n,]/).map((h) => h.trim().toLowerCase()).filter(Boolean).filter((v, i, arr) => arr.indexOf(v) === i); }
 function parseCustomHeaders(raw) {
   if (!raw.trim()) return {};
@@ -54,6 +59,13 @@ function parseCustomHeaders(raw) {
 function parseRequestHeaders(raw) { return parseCustomHeaders(raw); }
 function headersConfig(data) { return { forwardHeaders: parseHeaderNames(data.forwardHeaders), customHeaders: parseCustomHeaders(data.customHeaders) }; }
 function csrf(c) { return getCookie(c, CSRF_COOKIE) || ''; }
+async function requireAdminCsrf(c, next) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) return next();
+  const data = await body(c).catch(() => ({}));
+  c.set('parsedBody', data);
+  if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  await next();
+}
 async function auditAdminChange(c, action, entityType, entityId = null, metadata = {}) {
   await query(`insert into audit_logs (actor_user_id, action, entity_type, entity_id, ip_address, user_agent, metadata) values ($1,$2,$3,$4,nullif($5, '')::inet,$6,$7::jsonb)`, [c.get('user')?.id || null, action, entityType, entityId, c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || '', c.req.header('user-agent') || '', JSON.stringify(metadata)]);
 }
@@ -234,14 +246,20 @@ admin.get('/endpoints/:id', async (c) => {
 });
 
 async function saveEndpoint(c, id) {
-  const data = await body(c); if (!c.req.path.startsWith('/admin/api') && !csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
   const parsed = endpointSchema.safeParse(data);
   if (!parsed.success) {
     const errors = parsed.error.issues.map(i => i.message);
     if (wantsJson(c)) return c.json({ errors }, 400);
     return render(c, id ? 'Edit endpoint' : 'Create endpoint', endpointForm(c, id ? `/admin/endpoints/${id}` : '/admin/endpoints', {}, errors));
   }
-  let config; try { config = headersConfig(parsed.data); } catch (error) { return c.json({ errors: [error.message] }, 400); }
+  let config;
+  try {
+    config = headersConfig(parsed.data);
+    if (!(await getSetting('proxy.allow_internal_targets', false))) await assertPublicHttpUrl(parsed.data.targetUrl);
+  } catch (error) {
+    return c.json({ errors: [error.message || 'Invalid endpoint configuration'] }, 400);
+  }
   const values = [parsed.data.publicPath, parsed.data.targetUrl, parsed.data.httpMethod, parsed.data.isEnabled, config, parsed.data.timeoutMs, parsed.data.creditCost, parsed.data.description, parsed.data.adminNotes, parsed.data.deductCreditsOnFailure, c.get('user').id];
   const sql = id ? `update proxy_endpoints set public_path=$1,target_url=$2,http_method=$3,is_enabled=$4,headers_config=$5,timeout_ms=$6,credit_cost=$7,description=$8,admin_notes=$9,deduct_credits_on_failure=$10,updated_by=$11 where id=$12 returning *` : `insert into proxy_endpoints (public_path,target_url,http_method,is_enabled,headers_config,timeout_ms,credit_cost,description,admin_notes,deduct_credits_on_failure,created_by,updated_by) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11) returning *`;
   try { const saved = await query(sql, id ? [...values, id] : values); await auditAdminChange(c, id ? 'admin_endpoint_updated' : 'admin_endpoint_created', 'proxy_endpoint', saved.rows[0].id, { publicPath: saved.rows[0].public_path, method: saved.rows[0].http_method }); return wantsJson(c) ? c.json({ endpoint: saved.rows[0] }, id ? 200 : 201) : c.redirect(`/admin/endpoints/${saved.rows[0].id}`, 303); }
@@ -313,6 +331,8 @@ admin.post('/credits/adjust', async (c) => {
   catch (error) { return c.json({ error: error.message }, 400); }
   return c.redirect('/admin/credits', 303);
 });
+
+admin.use('/api/*', requireAdminCsrf);
 
 admin.get('/api/credits/transactions', async (c) => c.json({ transactions: (await query(`select * from credit_transactions order by created_at desc limit 500`)).rows }));
 admin.post('/api/credits/adjust', async (c) => {

@@ -15,7 +15,8 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY: z.string().optional().default(''),
   STRIPE_WEBHOOK_SECRET: z.string().optional().default(''),
   STRIPE_SUCCESS_URL: z.string().optional().default(''),
-  STRIPE_CANCEL_URL: z.string().optional().default('')
+  STRIPE_CANCEL_URL: z.string().optional().default(''),
+  API_KEY_PEPPER: z.string().min(16).optional().default('')
 });
 
 const parsed = envSchema.safeParse(process.env);

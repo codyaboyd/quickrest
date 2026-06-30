@@ -1,5 +1,7 @@
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHmac, createHash } from 'node:crypto';
 import { query } from '../db/postgres.js';
+import { env } from '../config/env.js';
+import { normalizeOriginHost } from './security.js';
 
 const API_KEY_PREFIX = 'qrst';
 
@@ -8,7 +10,14 @@ export function generateApiKey() {
 }
 
 export function hashApiKey(apiKey) {
-  return createHash('sha256').update(apiKey).digest('hex');
+  return createHmac('sha256', env.API_KEY_PEPPER || env.SESSION_SECRET).update(apiKey).digest('hex');
+}
+
+export function apiKeyHashCandidates(apiKey) {
+  const hashes = [hashApiKey(apiKey)];
+  const legacy = createHash('sha256').update(apiKey).digest('hex');
+  if (!hashes.includes(legacy)) hashes.push(legacy);
+  return hashes;
 }
 
 export function apiKeyPrefix(apiKey) {
@@ -37,7 +46,8 @@ export async function rotateApiKey(userId) {
 }
 
 export function normalizeDomain(domain) {
-  return domain.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+  const normalized = normalizeOriginHost(domain);
+  return normalized.startsWith('*.') ? `*.${normalizeOriginHost(normalized.slice(2))}` : normalized;
 }
 
 export function domainMatches(host, allowedDomain) {
