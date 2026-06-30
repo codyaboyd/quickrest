@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
-import { pool, query } from '../db/postgres.js';
+import { query } from '../db/postgres.js';
+import { deductEndpointCredits, ensureCreditBalance } from './creditService.js';
 import { hashApiKey, domainMatches, logAuthAttempt } from './apiKeyService.js';
 
 const SUPPORTED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -33,7 +34,7 @@ export async function handleDynamicProxy(c) {
   }
 
   const creditCost = await resolveCreditCost(endpoint);
-  const balance = await getCreditBalance(auth.user.id);
+  const balance = (await ensureCreditBalance(auth.user.id)).balance;
   if (balance < creditCost) {
     await logProxyRequest({ endpoint, auth, c, sourceUrl, status: 402, failureReason: 'Insufficient credits', startedAt, creditsCharged: 0 });
     await auditUsage({ c, auth, endpoint, action: 'proxy_credit_rejected', metadata: { creditCost, balance } });
@@ -75,7 +76,7 @@ export async function handleDynamicProxy(c) {
   let creditsCharged = 0;
   if (shouldCharge) {
     try {
-      creditsCharged = await deductCredits({ userId: auth.user.id, apiKeyId: auth.apiKey.id, endpoint, amount: creditCost, requestId, success: Boolean(upstreamResponse), failureReason });
+      creditsCharged = (await deductEndpointCredits({ userId: auth.user.id, apiKeyId: auth.apiKey.id, endpoint, amount: creditCost, requestId, success: Boolean(upstreamResponse), failureReason })).charged;
     } catch (error) {
       await logProxyRequest({ endpoint, auth, c, sourceUrl, status: 402, failureReason: error.message, startedAt, creditsCharged: 0 });
       await auditUsage({ c, auth, endpoint, action: 'proxy_credit_rejected', metadata: { creditCost, reason: error.message } });
@@ -131,34 +132,6 @@ async function validateProxyAccess(request, endpoint, c) {
 async function resolveCreditCost(endpoint) {
   const rules = await query(`select credit_cost from endpoint_credit_rules where endpoint_id = $1 and is_enabled = true order by priority asc limit 1`, [endpoint.id]);
   return rules.rows[0]?.credit_cost ?? endpoint.credit_cost;
-}
-
-async function getCreditBalance(userId) {
-  const result = await query(`select balance from credit_balances where user_id = $1 and currency = 'credits'`, [userId]);
-  return result.rows[0]?.balance ?? 0;
-}
-
-async function deductCredits({ userId, apiKeyId, endpoint, amount, requestId, success, failureReason }) {
-  const client = await pool.connect();
-  try {
-    await client.query('begin');
-    const balanceResult = await client.query(`select id, balance from credit_balances where user_id = $1 and currency = 'credits' for update`, [userId]);
-    const balance = balanceResult.rows[0];
-    if (!balance || balance.balance < amount) throw new Error('Insufficient credits');
-    const updated = await client.query(`update credit_balances set balance = balance - $2, lifetime_used = lifetime_used + $2 where id = $1 returning balance`, [balance.id, amount]);
-    await client.query(
-      `insert into credit_transactions (user_id, balance_id, api_key_id, endpoint_id, transaction_type, amount, balance_after, request_id, metadata, description)
-       values ($1,$2,$3,$4,'usage',$5,$6,$7,$8::jsonb,$9)`,
-      [userId, balance.id, apiKeyId, endpoint.id, -amount, updated.rows[0].balance, requestId, JSON.stringify({ publicPath: endpoint.public_path, success, failureReason }), `Proxy usage: ${endpoint.public_path}`]
-    );
-    await client.query('commit');
-    return amount;
-  } catch (error) {
-    await client.query('rollback');
-    throw error;
-  } finally {
-    client.release();
-  }
 }
 
 function buildForwardHeaders(incomingHeaders, config = {}) {
