@@ -37,7 +37,7 @@ pages.get('/logout', requireAuth, (c) => render(c, 'Logout', `<div class="contai
 
 pages.get('/account', requireAuth, (c) => render(c, 'Account settings', `<div class="container py-5"><h1 class="fw-bold">Account settings</h1><div class="card shadow-sm"><div class="card-body"><dl class="row mb-0"><dt class="col-sm-3">Username</dt><dd class="col-sm-9">${escapeHtml(c.get('user').username)}</dd><dt class="col-sm-3">Email</dt><dd class="col-sm-9">${escapeHtml(c.get('user').email)}</dd><dt class="col-sm-3">Role</dt><dd class="col-sm-9"><span class="badge text-bg-secondary">${escapeHtml(c.get('user').role)}</span></dd><dt class="col-sm-3">Status</dt><dd class="col-sm-9">${escapeHtml(c.get('user').status)}</dd></dl></div></div></div>`));
 
-function nav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/dashboard">Customer dashboard</a><a class="list-group-item" href="/api-key">API key</a><a class="list-group-item" href="/domains">Allowed domains</a><a class="list-group-item" href="/credits">Credits</a><a class="list-group-item" href="/usage">Usage logs</a><a class="list-group-item" href="/account">Account settings</a></div>`; }
+function nav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/dashboard">Customer dashboard</a><a class="list-group-item" href="/api-key">API key</a><a class="list-group-item" href="/domains">Allowed domains</a><a class="list-group-item" href="/credits">Credits & billing</a><a class="list-group-item" href="/usage">Usage logs</a><a class="list-group-item" href="/account">Account settings</a></div>`; }
 
 pages.get('/dashboard', requireAuth, async (c) => {
   const userId = c.get('user').id;
@@ -64,10 +64,20 @@ pages.get('/domains', requireAuth, async (c) => {
 });
 
 pages.get('/credits', requireAuth, async (c) => {
-  const b = (await query('select balance, lifetime_purchased, lifetime_used from credit_balances where user_id = $1', [c.get('user').id])).rows[0] || { balance: 0, lifetime_purchased: 0, lifetime_used: 0 };
-  const txs = await query(`select transaction_type, amount, balance_after, stripe_reference, request_id, description, created_at from credit_transactions where user_id = $1 order by created_at desc limit 100`, [c.get('user').id]);
+  const userId = c.get('user').id;
+  const [balance, txs, packages, sessions] = await Promise.all([
+    query('select balance, lifetime_purchased, lifetime_used from credit_balances where user_id = $1', [userId]),
+    query(`select transaction_type, amount, balance_after, stripe_reference, request_id, description, created_at from credit_transactions where user_id = $1 order by created_at desc limit 100`, [userId]),
+    query('select id, name, credits, amount_cents, currency from credit_packages where is_active = true order by sort_order, amount_cents'),
+    query(`select s.created_at, p.name, s.credits, s.amount_total_cents, s.currency, s.status, s.payment_status, s.stripe_session_id
+             from stripe_checkout_sessions s left join credit_packages p on p.id = s.credit_package_id
+            where s.user_id = $1 order by s.created_at desc limit 50`, [userId])
+  ]);
+  const b = balance.rows[0] || { balance: 0, lifetime_purchased: 0, lifetime_used: 0 };
+  const packageCards = packages.rows.map(p => `<div class="col-md-4"><div class="card h-100 shadow-sm"><div class="card-body"><h3 class="h5">${escapeHtml(p.name)}</h3><p class="display-6 fw-bold">${p.credits.toLocaleString()}</p><p class="text-muted">credits for $${(p.amount_cents / 100).toFixed(2)} ${escapeHtml(p.currency.toUpperCase())}</p><form method="post" action="/billing/create-checkout-session"><input type="hidden" name="csrfToken" value="${csrfToken(c)}"><input type="hidden" name="packageId" value="${p.id}"><button class="btn btn-primary w-100">Buy credits</button></form></div></div></div>`).join('') || '<p class="text-muted">No credit packages are currently available.</p>';
+  const purchaseRows = sessions.rows.map(s => `<tr><td>${s.created_at}</td><td>${escapeHtml(s.name || 'Credit package')}</td><td>${s.credits}</td><td>$${(s.amount_total_cents / 100).toFixed(2)} ${escapeHtml(s.currency.toUpperCase())}</td><td>${escapeHtml(s.status)}</td><td>${escapeHtml(s.payment_status)}</td><td><code>${escapeHtml(s.stripe_session_id)}</code></td></tr>`).join('');
   const rows = txs.rows.map(t => `<tr><td>${t.created_at}</td><td><span class="badge text-bg-secondary">${escapeHtml(t.transaction_type)}</span></td><td>${t.amount}</td><td>${t.balance_after ?? ''}</td><td>${escapeHtml(t.stripe_reference || t.request_id || '')}</td><td>${escapeHtml(t.description || '')}</td></tr>`).join('');
-  return render(c, 'Credits', `<div class="container py-5"><h1 class="fw-bold">Credits</h1>${nav()}<div class="card mb-4"><div class="card-body"><h2>${b.balance} credits</h2><p class="text-muted">Lifetime purchased: ${b.lifetime_purchased}. Lifetime used: ${b.lifetime_used}.</p></div></div><h2 class="h5">Credit history</h2><div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Balance after</th><th>Reference</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table></div></div>`);
+  return render(c, 'Credits', `<div class="container py-5"><h1 class="fw-bold">Credits & billing</h1>${nav()}<div class="card mb-4"><div class="card-body"><h2>${b.balance} credits</h2><p class="text-muted">Lifetime purchased: ${b.lifetime_purchased}. Lifetime used: ${b.lifetime_used}.</p></div></div><h2 class="h4">Buy credits</h2><div class="row g-4 mb-5">${packageCards}</div><h2 class="h5">Purchase history</h2><div class="table-responsive mb-5"><table class="table"><thead><tr><th>Date</th><th>Package</th><th>Credits</th><th>Amount</th><th>Status</th><th>Payment</th><th>Stripe session</th></tr></thead><tbody>${purchaseRows}</tbody></table></div><h2 class="h5">Credit history</h2><div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Balance after</th><th>Reference</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table></div></div>`);
 });
 
 pages.get('/usage', requireAuth, async (c) => {

@@ -11,7 +11,11 @@ const envSchema = z.object({
   SESSION_SECRET: z.string().min(24, 'SESSION_SECRET must be at least 24 characters'),
   RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_MAX_REQUESTS: z.coerce.number().int().positive().default(120),
-  DEFAULT_CREDIT_COST: z.coerce.number().int().positive().default(1)
+  DEFAULT_CREDIT_COST: z.coerce.number().int().positive().default(1),
+  STRIPE_SECRET_KEY: z.string().optional().default(''),
+  STRIPE_WEBHOOK_SECRET: z.string().optional().default(''),
+  STRIPE_SUCCESS_URL: z.string().optional().default(''),
+  STRIPE_CANCEL_URL: z.string().optional().default('')
 });
 
 const parsed = envSchema.safeParse(process.env);

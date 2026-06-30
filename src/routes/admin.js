@@ -51,7 +51,7 @@ function parseCustomHeaders(raw) {
 function parseRequestHeaders(raw) { return parseCustomHeaders(raw); }
 function headersConfig(data) { return { forwardHeaders: parseHeaderNames(data.forwardHeaders), customHeaders: parseCustomHeaders(data.customHeaders) }; }
 function csrf(c) { return getCookie(c, CSRF_COOKIE) || ''; }
-function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
+function adminNav() { return `<div class="list-group mb-4"><a class="list-group-item" href="/admin">Admin dashboard</a><a class="list-group-item" href="/admin/endpoints">Endpoint list</a><a class="list-group-item" href="/admin/endpoints/new">Create endpoint</a><a class="list-group-item" href="/admin/credits">Credits & transactions</a><a class="list-group-item" href="/admin/billing">Billing packages & revenue</a><a class="list-group-item" href="/admin/test">Test proxy endpoint</a></div>`; }
 function errorBlock(errors) { return errors?.length ? `<div class="alert alert-danger"><strong>Fix these issues:</strong><ul class="mb-0">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join('')}</ul></div>` : ''; }
 function endpointForm(c, action, endpoint = {}, errors = []) {
   const config = endpoint.headers_config || {};
@@ -102,6 +102,43 @@ admin.post('/endpoints', (c) => saveEndpoint(c));
 admin.post('/endpoints/:id', (c) => saveEndpoint(c, c.req.param('id')));
 admin.post('/endpoints/:id/toggle', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('update proxy_endpoints set is_enabled = not is_enabled, updated_by = $2 where id = $1', [c.req.param('id'), c.get('user').id]); return c.redirect(`/admin/endpoints/${c.req.param('id')}`, 303); });
 admin.post('/endpoints/:id/delete', async (c) => { const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403); await query('delete from proxy_endpoints where id = $1', [c.req.param('id')]); return c.redirect('/admin/endpoints', 303); });
+
+
+const packageSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  credits: z.coerce.number().int().positive().max(100000000),
+  amountCents: z.coerce.number().int().positive().max(100000000),
+  currency: z.string().trim().toLowerCase().regex(/^[a-z]{3}$/).default('usd'),
+  sortOrder: z.coerce.number().int().min(0).max(100000).default(100),
+  isActive: boolFromForm.default(false)
+});
+
+admin.get('/billing', async (c) => {
+  const [packages, revenue, purchases, events] = await Promise.all([
+    query('select * from credit_packages order by sort_order, amount_cents'),
+    query(`select count(*)::int purchases, coalesce(sum(amount_total_cents) filter (where payment_status = 'paid'),0)::int revenue_cents, coalesce(sum(credits) filter (where payment_status = 'paid'),0)::int credits_sold from stripe_checkout_sessions`),
+    query(`select s.created_at, u.email, p.name, s.credits, s.amount_total_cents, s.currency, s.status, s.payment_status, s.stripe_session_id
+             from stripe_checkout_sessions s join users u on u.id = s.user_id left join credit_packages p on p.id = s.credit_package_id
+            order by s.created_at desc limit 100`),
+    query(`select stripe_event_id, event_type, processing_status, error_message, created_at, processed_at from stripe_webhook_events order by created_at desc limit 50`)
+  ]);
+  const r = revenue.rows[0];
+  const packageRows = packages.rows.map(p => `<tr><form method="post" action="/admin/billing/packages/${p.id}"><td><input class="form-control" name="name" value="${escapeHtml(p.name)}"></td><td><input class="form-control" type="number" name="credits" value="${p.credits}"></td><td><input class="form-control" type="number" name="amountCents" value="${p.amount_cents}"></td><td><input class="form-control" name="currency" value="${escapeHtml(p.currency)}"></td><td><input class="form-control" type="number" name="sortOrder" value="${p.sort_order}"></td><td><input class="form-check-input" type="checkbox" name="isActive" ${p.is_active ? 'checked' : ''}></td><td><input type="hidden" name="csrfToken" value="${csrf(c)}"><button class="btn btn-sm btn-primary">Save</button></td></form></tr>`).join('');
+  const purchaseRows = purchases.rows.map(p => `<tr><td>${p.created_at}</td><td>${escapeHtml(p.email)}</td><td>${escapeHtml(p.name || '')}</td><td>${p.credits}</td><td>$${(p.amount_total_cents / 100).toFixed(2)} ${escapeHtml(p.currency.toUpperCase())}</td><td>${escapeHtml(p.status)}</td><td>${escapeHtml(p.payment_status)}</td><td><code>${escapeHtml(p.stripe_session_id)}</code></td></tr>`).join('');
+  const eventRows = events.rows.map(e => `<tr><td>${e.created_at}</td><td><code>${escapeHtml(e.stripe_event_id)}</code></td><td>${escapeHtml(e.event_type)}</td><td>${escapeHtml(e.processing_status)}</td><td>${escapeHtml(e.error_message || '')}</td></tr>`).join('');
+  return render(c, 'Billing packages & revenue', `<div class="container py-5"><h1 class="fw-bold">Billing packages & revenue</h1>${adminNav()}<div class="row g-4 mb-4"><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Paid sessions</span><h2>${r.purchases}</h2></div></div></div><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Revenue</span><h2>$${(r.revenue_cents / 100).toFixed(2)}</h2></div></div></div><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credits sold</span><h2>${r.credits_sold}</h2></div></div></div></div><h2 class="h5">Create package</h2><form class="row g-2 mb-4" method="post" action="/admin/billing/packages"><input type="hidden" name="csrfToken" value="${csrf(c)}"><div class="col"><input class="form-control" name="name" placeholder="Package name" required></div><div class="col"><input class="form-control" name="credits" type="number" placeholder="Credits" required></div><div class="col"><input class="form-control" name="amountCents" type="number" placeholder="Amount cents" required></div><div class="col"><input class="form-control" name="currency" value="usd"></div><div class="col"><input class="form-control" name="sortOrder" type="number" value="100"></div><div class="col-auto form-check pt-2"><input class="form-check-input" type="checkbox" name="isActive" checked> Active</div><div class="col-auto"><button class="btn btn-primary">Add</button></div></form><h2 class="h5">Packages</h2><div class="table-responsive mb-5"><table class="table"><thead><tr><th>Name</th><th>Credits</th><th>Amount cents</th><th>Currency</th><th>Sort</th><th>Active</th><th></th></tr></thead><tbody>${packageRows}</tbody></table></div><h2 class="h5">Purchases</h2><div class="table-responsive mb-5"><table class="table"><thead><tr><th>Date</th><th>User</th><th>Package</th><th>Credits</th><th>Amount</th><th>Status</th><th>Payment</th><th>Session</th></tr></thead><tbody>${purchaseRows}</tbody></table></div><h2 class="h5">Stripe webhook events</h2><div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Event</th><th>Type</th><th>Status</th><th>Error</th></tr></thead><tbody>${eventRows}</tbody></table></div></div>`);
+});
+
+async function savePackage(c, id) {
+  const data = await body(c); if (!csrfOk(c, data)) return c.json({ error: 'Invalid CSRF token' }, 403);
+  const parsed = packageSchema.safeParse(data); if (!parsed.success) return c.json({ errors: parsed.error.issues.map(i => i.message) }, 400);
+  const v = parsed.data;
+  if (id) await query(`update credit_packages set name=$1, credits=$2, amount_cents=$3, currency=$4, sort_order=$5, is_active=$6, updated_by=$7 where id=$8`, [v.name, v.credits, v.amountCents, v.currency, v.sortOrder, v.isActive, c.get('user').id, id]);
+  else await query(`insert into credit_packages (name, credits, amount_cents, currency, sort_order, is_active, created_by, updated_by) values ($1,$2,$3,$4,$5,$6,$7,$7)`, [v.name, v.credits, v.amountCents, v.currency, v.sortOrder, v.isActive, c.get('user').id]);
+  return c.redirect('/admin/billing', 303);
+}
+admin.post('/billing/packages', (c) => savePackage(c));
+admin.post('/billing/packages/:id', (c) => savePackage(c, c.req.param('id')));
 
 const creditAdjustSchema = z.object({ userId: z.string().uuid(), amount: z.coerce.number().int().min(-1000000).max(1000000).refine(v => v !== 0), description: z.string().trim().max(1000).optional().default('Admin credit adjustment') });
 
