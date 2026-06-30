@@ -26,6 +26,7 @@ export function layout({ title, children, user }) {
           <li class="nav-item"><a class="nav-link" href="/dashboard">Dashboard</a></li>
           <li class="nav-item"><a class="nav-link" href="/api-key">API key</a></li>
           <li class="nav-item"><a class="nav-link" href="/credits">Credits</a></li>
+          ${user?.role === 'admin' ? '<li class="nav-item"><a class="nav-link" href="/admin">Admin</a></li>' : ''}
           <li class="nav-item"><a class="nav-link" href="/health">Health</a></li>
           ${accountLinks}
         </ul>
