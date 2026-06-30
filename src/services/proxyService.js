@@ -1,6 +1,7 @@
 import { env } from '../config/env.js';
 import { query } from '../db/postgres.js';
 import { hashApiKey, domainMatches, logAuthAttempt } from './apiKeyService.js';
+import { clientIp } from './apiProtectionService.js';
 
 const demoServices = new Map([
   ['weather', {
@@ -22,14 +23,15 @@ export function listDemoServices() {
 }
 
 export async function proxyRequest(serviceSlug, request, c) {
+  const startedAt = performance.now();
+  const sourceUrl = new URL(request.url);
   const service = demoServices.get(serviceSlug);
   const auth = await validateProxyAccess(request, serviceSlug, c);
   if (!auth.ok) return { status: auth.status, body: { error: auth.error } };
   if (!service) {
+    await logDemoProxyRequest({ request, c, serviceSlug, sourceUrl, auth, status: 404, failureReason: 'Unknown API service', startedAt });
     return { status: 404, body: { error: 'Unknown API service' } };
   }
-
-  const sourceUrl = new URL(request.url);
   const upstreamUrl = new URL(service.upstreamUrl);
   sourceUrl.searchParams.forEach((value, key) => upstreamUrl.searchParams.set(key, value));
 
@@ -46,7 +48,7 @@ export async function proxyRequest(serviceSlug, request, c) {
     ? await upstreamResponse.json()
     : await upstreamResponse.text();
 
-  await query(`insert into api_usage_logs (user_id, api_key_id, service_slug, request_method, request_path, request_domain, response_status, credits_charged) values ($1,$2,$3,$4,$5,$6,$7,$8)`, [auth.user.id, auth.apiKey.id, service.slug, request.method, sourceUrl.pathname, request.headers.get('origin') || request.headers.get('referer') || request.headers.get('host'), upstreamResponse.status, service.creditCost]);
+  await logDemoProxyRequest({ request, c, serviceSlug: service.slug, sourceUrl, auth, status: upstreamResponse.status, creditsCharged: service.creditCost, startedAt });
   await query('update api_keys set last_used_at = now() where id = $1', [auth.apiKey.id]);
 
   return {
@@ -66,7 +68,7 @@ async function validateProxyAccess(request, serviceSlug, c) {
   const rawKey = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : request.headers.get('x-api-key');
   const sourceUrl = new URL(request.url);
   const fail = async (status, error, extra = {}) => {
-    await query(`insert into api_usage_logs (user_id, api_key_id, service_slug, request_method, request_path, request_domain, auth_success, failure_reason) values ($1,$2,$3,$4,$5,$6,false,$7)`, [extra.userId || null, extra.apiKeyId || null, serviceSlug, request.method, sourceUrl.pathname, request.headers.get('origin') || request.headers.get('referer') || request.headers.get('host'), error]);
+    await logDemoProxyRequest({ request, c, serviceSlug, sourceUrl, auth: { ok: false, user: { id: extra.userId }, apiKey: { id: extra.apiKeyId } }, status, failureReason: error, startedAt: performance.now() });
     if (c) await logAuthAttempt({ userId: extra.userId, apiKeyId: extra.apiKeyId, action: 'proxy_auth_failed', reason: error, c }).catch(() => {});
     return { ok: false, status, error };
   };
@@ -83,4 +85,12 @@ async function validateProxyAccess(request, serviceSlug, c) {
     }
   }
   return { ok: true, user: { id: row.user_id, username: row.username }, apiKey: { id: row.id } };
+}
+
+async function logDemoProxyRequest({ request, c, serviceSlug, sourceUrl, auth, status, failureReason = null, creditsCharged = 0, startedAt }) {
+  await query(
+    `insert into api_usage_logs (user_id, api_key_id, service_slug, request_method, request_path, request_domain, response_status, credits_charged, auth_success, failure_reason, duration_ms, request_ip)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,nullif($12, '')::inet)`,
+    [auth.user?.id || null, auth.apiKey?.id || null, serviceSlug, request.method, sourceUrl.pathname, request.headers.get('origin') || request.headers.get('referer') || request.headers.get('host'), status, creditsCharged, auth.ok !== false, failureReason, Math.round(performance.now() - startedAt), c ? clientIp(c) : '']
+  );
 }
