@@ -70,11 +70,35 @@ async function recentUsage(id) { return (await query(`select created_at, request
 async function findEndpoint(id) { return (await query('select * from proxy_endpoints where id = $1', [id])).rows[0]; }
 
 admin.get('/', async (c) => {
-  const stats = await query(`select count(*)::int total, count(*) filter (where is_enabled)::int enabled, coalesce(sum(credit_cost),0)::int configured_credits from proxy_endpoints`);
-  const usage = await query(`select coalesce(sum(credits_charged),0)::int credits, count(*)::int calls from api_usage_logs where endpoint_id is not null`);
-  const s = stats.rows[0], u = usage.rows[0];
-  return render(c, 'Admin dashboard', `<div class="container py-5"><h1 class="fw-bold mb-4">Admin dashboard</h1>${adminNav()}<div class="row g-4"><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Endpoints</span><h2>${s.total}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Enabled</span><h2>${s.enabled}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Proxy calls</span><h2>${u.calls}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credits used</span><h2>${u.credits}</h2></div></div></div></div></div>`);
+  const [metrics, topEndpoints, topUsers, failed, webhookHealth, recentAdminActions] = await Promise.all([
+    query(`select
+             (select count(*)::int from users) total_users,
+             (select count(*)::int from users where status = 'active') active_users,
+             (select coalesce(sum(amount_total_cents),0)::int from stripe_checkout_sessions where payment_status = 'paid') revenue_cents,
+             (select coalesce(sum(credits),0)::int from stripe_checkout_sessions where payment_status = 'paid') credits_sold,
+             (select coalesce(sum(credits_charged),0)::int from api_usage_logs) credits_consumed,
+             (select count(*)::int from api_usage_logs where created_at >= now() - interval '24 hours') requests_24h`),
+    query(`select coalesce(e.public_path, l.service_slug, l.request_path) endpoint, count(*)::int calls, coalesce(sum(l.credits_charged),0)::int credits, coalesce(avg(l.duration_ms),0)::int avg_ms
+             from api_usage_logs l left join proxy_endpoints e on e.id = l.endpoint_id
+            group by 1 order by calls desc limit 10`),
+    query(`select u.email, u.username, count(l.*)::int calls, coalesce(sum(l.credits_charged),0)::int credits
+             from api_usage_logs l join users u on u.id = l.user_id
+            group by u.id order by credits desc, calls desc limit 10`),
+    query(`select l.created_at, u.email, coalesce(e.public_path, l.service_slug, l.request_path) endpoint, l.request_method, l.request_path, l.response_status, l.failure_reason, l.request_ip, l.request_domain
+             from api_usage_logs l left join users u on u.id = l.user_id left join proxy_endpoints e on e.id = l.endpoint_id
+            where l.auth_success = false or coalesce(l.response_status, 0) >= 400 order by l.created_at desc limit 25`),
+    query(`select processing_status, count(*)::int count from stripe_webhook_events where created_at >= now() - interval '7 days' group by processing_status`),
+    query(`select a.created_at, u.email, a.action, a.entity_type from audit_logs a left join users u on u.id = a.actor_user_id where a.action like 'admin_%' order by a.created_at desc limit 15`)
+  ]);
+  const m = metrics.rows[0];
+  const endpointRows = topEndpoints.rows.map(r => `<tr><td>${escapeHtml(r.endpoint || '')}</td><td>${r.calls}</td><td>${r.credits}</td><td>${Math.round(r.avg_ms)}</td></tr>`).join('') || '<tr><td colspan="4" class="text-muted">No proxy usage yet.</td></tr>';
+  const userRows = topUsers.rows.map(r => `<tr><td>${escapeHtml(r.email || r.username || '')}</td><td>${r.calls}</td><td>${r.credits}</td></tr>`).join('') || '<tr><td colspan="3" class="text-muted">No user usage yet.</td></tr>';
+  const failedRows = failed.rows.map(r => `<tr><td>${r.created_at}</td><td>${escapeHtml(r.email || '')}</td><td>${escapeHtml(r.endpoint || '')}</td><td>${r.response_status ?? ''}</td><td>${escapeHtml(r.failure_reason || 'HTTP failure')}</td><td>${escapeHtml(r.request_ip || '')}</td></tr>`).join('') || '<tr><td colspan="6" class="text-muted">No failed proxy requests.</td></tr>';
+  const webhookRows = webhookHealth.rows.map(r => `<tr><td>${escapeHtml(r.processing_status)}</td><td>${r.count}</td></tr>`).join('') || '<tr><td colspan="2" class="text-muted">No webhook events in the last 7 days.</td></tr>';
+  const actionRows = recentAdminActions.rows.map(r => `<tr><td>${r.created_at}</td><td>${escapeHtml(r.email || 'system')}</td><td>${escapeHtml(r.action)}</td><td>${escapeHtml(r.entity_type)}</td></tr>`).join('') || '<tr><td colspan="4" class="text-muted">No recent admin actions.</td></tr>';
+  return render(c, 'Admin dashboard', `<div class="container py-5"><h1 class="fw-bold mb-4">Admin dashboard</h1>${adminNav()}<div class="row g-4 mb-4"><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Total users</span><h2>${m.total_users}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Active users</span><h2>${m.active_users}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Total revenue</span><h2>$${(m.revenue_cents / 100).toFixed(2)}</h2></div></div></div><div class="col-md-3"><div class="card metric-card"><div class="card-body"><span class="text-muted">Requests (24h)</span><h2>${m.requests_24h}</h2></div></div></div><div class="col-md-6"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credits sold</span><h2>${m.credits_sold}</h2></div></div></div><div class="col-md-6"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credits consumed</span><h2>${m.credits_consumed}</h2></div></div></div></div><div class="row g-4"><div class="col-lg-6"><div class="card h-100"><div class="card-body"><h2 class="h5">Top endpoints</h2><table class="table table-sm"><thead><tr><th>Endpoint</th><th>Calls</th><th>Credits</th><th>Avg ms</th></tr></thead><tbody>${endpointRows}</tbody></table></div></div></div><div class="col-lg-6"><div class="card h-100"><div class="card-body"><h2 class="h5">Top users</h2><table class="table table-sm"><thead><tr><th>User</th><th>Calls</th><th>Credits</th></tr></thead><tbody>${userRows}</tbody></table></div></div></div><div class="col-lg-8"><div class="card h-100"><div class="card-body"><h2 class="h5">Failed proxy requests</h2><div class="table-responsive"><table class="table table-sm"><thead><tr><th>Date</th><th>User</th><th>Endpoint</th><th>Status</th><th>Reason</th><th>IP</th></tr></thead><tbody>${failedRows}</tbody></table></div></div></div></div><div class="col-lg-4"><div class="card mb-4"><div class="card-body"><h2 class="h5">Stripe webhook health</h2><table class="table table-sm"><thead><tr><th>Status</th><th>7d events</th></tr></thead><tbody>${webhookRows}</tbody></table></div></div><div class="card"><div class="card-body"><h2 class="h5">Recent admin actions</h2><table class="table table-sm"><thead><tr><th>Date</th><th>Admin</th><th>Action</th><th>Entity</th></tr></thead><tbody>${actionRows}</tbody></table></div></div></div></div></div>`);
 });
+
 
 
 function parseSettingValue(definition, raw) {

@@ -214,9 +214,9 @@ function isPrivateAddress(address) {
 
 async function logProxyRequest({ endpoint, auth, c, sourceUrl, status, failureReason, startedAt, creditsCharged }) {
   await query(
-    `insert into api_usage_logs (user_id, api_key_id, endpoint_id, service_slug, request_method, request_path, request_domain, response_status, credits_charged, auth_success, failure_reason, duration_ms)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [auth.user?.id || null, auth.apiKey?.id || null, endpoint.id, endpoint.public_path, c.req.method, sourceUrl.pathname, c.req.header('origin') || c.req.header('referer') || c.req.header('host'), status, creditsCharged, auth.ok !== false, failureReason, Math.round(performance.now() - startedAt)]
+    `insert into api_usage_logs (user_id, api_key_id, endpoint_id, service_slug, request_method, request_path, request_domain, response_status, credits_charged, auth_success, failure_reason, duration_ms, request_ip)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,nullif($13, '')::inet)`,
+    [auth.user?.id || null, auth.apiKey?.id || null, endpoint.id, endpoint.public_path, c.req.method, sourceUrl.pathname, c.req.header('origin') || c.req.header('referer') || c.req.header('host'), status, creditsCharged, auth.ok !== false, failureReason, Math.round(performance.now() - startedAt), clientIp(c)]
   );
 }
 

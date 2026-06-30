@@ -41,13 +41,24 @@ function nav() { return `<div class="list-group mb-4"><a class="list-group-item"
 
 pages.get('/dashboard', requireAuth, async (c) => {
   const userId = c.get('user').id;
-  const [balance, usage, purchases] = await Promise.all([
+  const [balance, today, topEndpoints, recent, failures] = await Promise.all([
     query('select balance, lifetime_purchased, lifetime_used from credit_balances where user_id = $1 and currency = $2', [userId, 'credits']),
-    query('select count(*)::int as count from api_usage_logs where user_id = $1', [userId]),
-    query(`select coalesce(sum(amount),0)::int as total from credit_transactions where user_id = $1 and transaction_type = 'purchase'`, [userId])
+    query(`select count(*)::int requests_today from api_usage_logs where user_id = $1 and created_at >= date_trunc('day', now())`, [userId]),
+    query(`select coalesce(e.public_path, l.service_slug, l.request_path) endpoint, count(*)::int calls, coalesce(sum(l.credits_charged),0)::int credits
+             from api_usage_logs l left join proxy_endpoints e on e.id = l.endpoint_id
+            where l.user_id = $1 group by 1 order by calls desc limit 5`, [userId]),
+    query(`select l.created_at, coalesce(e.public_path, l.service_slug, l.request_path) endpoint, l.request_method, l.request_path, l.response_status, l.credits_charged, l.duration_ms, l.failure_reason
+             from api_usage_logs l left join proxy_endpoints e on e.id = l.endpoint_id
+            where l.user_id = $1 order by l.created_at desc limit 10`, [userId]),
+    query(`select l.created_at, coalesce(e.public_path, l.service_slug, l.request_path) endpoint, l.request_method, l.response_status, l.failure_reason, l.request_domain
+             from api_usage_logs l left join proxy_endpoints e on e.id = l.endpoint_id
+            where l.user_id = $1 and (l.auth_success = false or coalesce(l.response_status, 0) >= 400) order by l.created_at desc limit 10`, [userId])
   ]);
   const b = balance.rows[0] || { balance: 0, lifetime_purchased: 0, lifetime_used: 0 };
-  return render(c, 'Customer dashboard', `<div class="container py-5"><h1 class="fw-bold mb-4">Customer dashboard</h1>${nav()}<div class="row g-4"><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credit balance</span><h2>${b.balance}</h2></div></div></div><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">API calls</span><h2>${usage.rows[0].count}</h2></div></div></div><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Purchased</span><h2>${purchases.rows[0].total}</h2></div></div></div></div></div>`);
+  const endpointRows = topEndpoints.rows.map(r => `<tr><td>${escapeHtml(r.endpoint || '')}</td><td>${r.calls}</td><td>${r.credits}</td></tr>`).join('') || '<tr><td colspan="3" class="text-muted">No usage yet.</td></tr>';
+  const recentRows = recent.rows.map(r => `<tr><td>${r.created_at}</td><td>${escapeHtml(r.endpoint || '')}</td><td>${escapeHtml(r.request_method)} ${escapeHtml(r.request_path)}</td><td>${r.response_status ?? ''}</td><td>${r.credits_charged}</td><td>${r.duration_ms ?? ''}</td></tr>`).join('') || '<tr><td colspan="6" class="text-muted">No recent requests.</td></tr>';
+  const failureRows = failures.rows.map(r => `<tr><td>${r.created_at}</td><td>${escapeHtml(r.endpoint || '')}</td><td>${r.response_status ?? ''}</td><td>${escapeHtml(r.failure_reason || 'HTTP failure')}</td><td>${escapeHtml(r.request_domain || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="text-muted">No failed requests.</td></tr>';
+  return render(c, 'Customer dashboard', `<div class="container py-5"><h1 class="fw-bold mb-4">Customer dashboard</h1>${nav()}<div class="row g-4 mb-4"><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Credits remaining</span><h2>${b.balance}</h2><p class="small text-muted mb-0">Purchased ${b.lifetime_purchased}; consumed ${b.lifetime_used}</p></div></div></div><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Requests today</span><h2>${today.rows[0].requests_today}</h2></div></div></div><div class="col-md-4"><div class="card metric-card"><div class="card-body"><span class="text-muted">Failed requests</span><h2>${failures.rows.length}</h2><p class="small text-muted mb-0">Latest 10 shown below</p></div></div></div></div><div class="row g-4"><div class="col-lg-5"><div class="card h-100"><div class="card-body"><h2 class="h5">Most used endpoints</h2><table class="table table-sm"><thead><tr><th>Endpoint</th><th>Requests</th><th>Credits</th></tr></thead><tbody>${endpointRows}</tbody></table></div></div></div><div class="col-lg-7"><div class="card h-100"><div class="card-body"><h2 class="h5">Recent usage</h2><div class="table-responsive"><table class="table table-sm"><thead><tr><th>Date</th><th>Endpoint</th><th>Request</th><th>Status</th><th>Credits</th><th>ms</th></tr></thead><tbody>${recentRows}</tbody></table></div></div></div></div><div class="col-12"><div class="card"><div class="card-body"><h2 class="h5">Failed requests</h2><div class="table-responsive"><table class="table table-sm"><thead><tr><th>Date</th><th>Endpoint</th><th>Status</th><th>Failure reason</th><th>Origin/domain</th></tr></thead><tbody>${failureRows}</tbody></table></div></div></div></div></div></div>`);
 });
 
 pages.get('/api-key', requireAuth, async (c) => {
@@ -81,7 +92,7 @@ pages.get('/credits', requireAuth, async (c) => {
 });
 
 pages.get('/usage', requireAuth, async (c) => {
-  const logs = await query('select service_slug, request_method, request_path, request_domain, response_status, credits_charged, auth_success, failure_reason, created_at from api_usage_logs where user_id = $1 order by created_at desc limit 100', [c.get('user').id]);
-  const rows = logs.rows.map(l => `<tr><td>${l.created_at}</td><td>${escapeHtml(l.service_slug || '')}</td><td>${escapeHtml(l.request_method)} ${escapeHtml(l.request_path)}</td><td>${escapeHtml(l.request_domain || '')}</td><td>${l.response_status ?? ''}</td><td>${l.credits_charged}</td><td>${l.auth_success ? 'OK' : escapeHtml(l.failure_reason || 'Failed')}</td></tr>`).join('');
-  return render(c, 'Usage logs', `<div class="container py-5"><h1 class="fw-bold">Usage logs</h1>${nav()}<div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Service</th><th>Request</th><th>Domain</th><th>Status</th><th>Credits</th><th>Auth</th></tr></thead><tbody>${rows}</tbody></table></div></div>`);
+  const logs = await query('select service_slug, request_method, request_path, request_domain, response_status, credits_charged, auth_success, failure_reason, request_ip, duration_ms, created_at from api_usage_logs where user_id = $1 order by created_at desc limit 100', [c.get('user').id]);
+  const rows = logs.rows.map(l => `<tr><td>${l.created_at}</td><td>${escapeHtml(l.service_slug || '')}</td><td>${escapeHtml(l.request_method)} ${escapeHtml(l.request_path)}</td><td>${escapeHtml(l.request_domain || '')}</td><td>${escapeHtml(l.request_ip || '')}</td><td>${l.response_status ?? ''}</td><td>${l.credits_charged}</td><td>${l.duration_ms ?? ''}</td><td>${l.auth_success ? 'OK' : escapeHtml(l.failure_reason || 'Failed')}</td></tr>`).join('');
+  return render(c, 'Usage logs', `<div class="container py-5"><h1 class="fw-bold">Usage logs</h1>${nav()}<div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Service</th><th>Request</th><th>Domain</th><th>IP</th><th>Status</th><th>Credits</th><th>Target ms</th><th>Auth</th></tr></thead><tbody>${rows}</tbody></table></div></div>`);
 });
