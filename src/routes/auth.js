@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getCookie } from 'hono/cookie';
 import { query } from '../db/postgres.js';
 import { CSRF_COOKIE, createSession, destroySession, hashSecret, verifySecret } from '../services/authService.js';
+import { ensureUserApiKey } from '../services/apiKeyService.js';
 
 export const auth = new Hono();
 
@@ -58,9 +59,10 @@ auth.post('/signup', async (c) => {
       [parsed.data.username, parsed.data.email, passwordHash, pinHash]
     );
     await query('insert into recovery_pins (user_id, pin_hash) values ($1, $2)', [result.rows[0].id, pinHash]);
+    const key = await ensureUserApiKey(result.rows[0].id);
     await createSession(c, result.rows[0]);
-    if (wantsHtml(c)) return c.redirect('/dashboard', 303);
-    return c.json({ user: result.rows[0] }, 201);
+    if (wantsHtml(c)) return c.html(`<div class="container py-5"><div class="alert alert-warning"><h1 class="h4">Your API key</h1><p>Store this API key now. It will only be shown once.</p><code>${key.rawKey}</code></div><a href="/dashboard">Continue to dashboard</a></div>`, 201);
+    return c.json({ user: result.rows[0], apiKey: key.rawKey, message: 'Store this API key now. It will only be shown once.' }, 201);
   } catch (error) {
     if (error.code === '23505') return c.json({ error: 'Username or email is already in use' }, 409);
     throw error;
@@ -76,6 +78,7 @@ auth.post('/login', async (c) => {
   const user = result.rows[0];
   if (!user || !(await verifySecret(user.password_hash, parsed.data.password))) return fail(c, 'Invalid email or password', 401);
   if (user.status === 'suspended') return fail(c, 'Account suspended', 403);
+  await ensureUserApiKey(user.id);
   await createSession(c, user);
   const safeUser = { id: user.id, username: user.username, email: user.email, role: user.role, status: user.status, created_at: user.created_at };
   if (wantsHtml(c)) return c.redirect('/dashboard', 303);

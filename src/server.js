@@ -9,6 +9,7 @@ import { loadSession } from './middleware/auth.js';
 import { api, healthHandler } from './routes/api.js';
 import { auth } from './routes/auth.js';
 import { pages } from './routes/pages.js';
+import { customer } from './routes/customer.js';
 
 const app = new Hono();
 
@@ -20,6 +21,7 @@ app.use('/assets/*', serveStatic({ root: './public' }));
 app.get('/health', healthHandler);
 app.route('/auth', auth);
 app.route('/', pages);
+app.route('/customer', customer);
 app.route('/api', api);
 
 app.notFound((c) => c.json({ error: 'Not found', requestId: c.get('requestId') }, 404));

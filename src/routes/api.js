@@ -7,7 +7,7 @@ export const api = new Hono();
 
 api.get('/services', (c) => c.json({ services: listDemoServices() }));
 api.all('/proxy/:service', async (c) => {
-  const result = await proxyRequest(c.req.param('service'), c.req.raw);
+  const result = await proxyRequest(c.req.param('service'), c.req.raw, c);
   return c.json(result.body, result.status);
 });
 
