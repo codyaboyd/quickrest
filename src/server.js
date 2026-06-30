@@ -6,6 +6,7 @@ import { env, isProduction } from './config/env.js';
 import { requestLogger } from './middleware/logger.js';
 import { rateLimit } from './middleware/rateLimit.js';
 import { loadSession } from './middleware/auth.js';
+import { maintenanceMode } from './middleware/maintenanceMode.js';
 import { api, healthHandler } from './routes/api.js';
 import { auth } from './routes/auth.js';
 import { pages } from './routes/pages.js';
@@ -20,6 +21,7 @@ app.use('*', requestLogger);
 app.use('/api/*', rateLimit());
 app.route('/webhooks', stripeWebhook);
 app.use('*', loadSession);
+app.use('*', maintenanceMode());
 app.use('/assets/*', serveStatic({ root: './public' }));
 
 app.get('/health', healthHandler);

@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { query } from '../db/postgres.js';
+import { getSetting } from './adminSettingsService.js';
 import { deductEndpointCredits, ensureCreditBalance } from './creditService.js';
 import { hashApiKey, domainMatches, logAuthAttempt } from './apiKeyService.js';
 
@@ -120,7 +121,9 @@ async function validateProxyAccess(request, endpoint, c) {
   if (!row) return fail(401, 'Invalid API key');
   if (row.user_status !== 'active') return fail(403, row.user_status === 'suspended' ? 'User suspended' : 'User inactive', { userId: row.user_id, apiKeyId: row.id });
   const domain = request.headers.get('origin') || request.headers.get('referer') || request.headers.get('host') || '';
-  if (!row.wildcard_domains_enabled) {
+  const domainBehavior = await getSetting('security.domain_allowlist_behavior', 'enforce');
+  const wildcardAllowed = domainBehavior === 'allow_wildcard_per_user' && row.wildcard_domains_enabled;
+  if (domainBehavior !== 'disabled' && !wildcardAllowed) {
     const domains = await query(`select domain from allowed_domains where user_id = $1 and status = 'active'`, [row.user_id]);
     if (domains.rowCount === 0 || !domains.rows.some((d) => domainMatches(domain, d.domain))) {
       return fail(403, 'Domain is not allowed', { userId: row.user_id, apiKeyId: row.id });
