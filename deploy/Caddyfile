@@ -1,0 +1,26 @@
+{
+  email admin@example.com
+}
+
+quickrest.example.com {
+  encode zstd gzip
+
+  @health path /health
+  reverse_proxy @health app:3000
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+  }
+
+  reverse_proxy app:3000 {
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Host {host}
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}
