@@ -7,7 +7,8 @@
     "dev": "bun --hot src/server.js",
     "start": "bun src/server.js",
     "check": "DATABASE_URL=postgres://quickrest:quickrest@localhost:5432/quickrest REDIS_URL=redis://localhost:6379 SESSION_SECRET=dev-check-secret-change-before-prod bun -e \"await import('./src/server.js'); const { redis } = await import('./src/lib/redis.js'); const { pool } = await import('./src/db/postgres.js'); redis.disconnect(); await pool.end();\"",
-    "db:migrate": "bun run src/db/migrate.js"
+    "db:migrate": "bun run src/db/migrate.js",
+    "db:seed-admin": "bun run src/db/seed-admin.js"
   },
   "dependencies": {
     "@hono/node-server": "latest",
